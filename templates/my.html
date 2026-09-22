@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}我的学习 · 企业知识库{% endblock %}
+{% block body %}
+<div class="page-head">
+  <h1>🎓 我的学习</h1>
+</div>
+
+<section class="section">
+  <h2 class="section-title">我的证书（{{ certs|length }}）</h2>
+  {% if certs %}
+  <div class="cert-list">
+    {% for c in certs %}
+    <a class="cert-item" href="{{ url_for('certificate', cid=c.course_id) }}">
+      <div class="cert-item-name">{{ c.course_title }}</div>
+      <div class="cert-item-no">{{ c.no }}</div>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty">还没有证书，完成课程并通过测验即可获得</div>
+  {% endif %}
+</section>
+
+<section class="section">
+  <h2 class="section-title">进行中（{{ learning|length }}）</h2>
+  {% for co, done, total in learning %}
+  <a class="course-item" href="{{ url_for('course', cid=co.id) }}">
+    <div class="course-cover">📘</div>
+    <div class="course-body">
+      <div class="course-name">{{ co.title }}</div>
+      <div class="progress-line">
+        <div class="bar"><div class="bar-fill" style="width:{{ done*100/total }}%"></div></div>
+        <span class="bar-text">{{ done }}/{{ total }}</span>
+      </div>
+    </div>
+  </a>
+  {% else %}
+  <div class="empty">暂无进行中的课程</div>
+  {% endfor %}
+</section>
+{% endblock %}

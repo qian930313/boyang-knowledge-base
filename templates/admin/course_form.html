@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+{% set hide_topbar = true %}
+{% block title %}课程编辑 · 企业知识库{% endblock %}
+{% block body %}
+<div class="page-head" style="display:flex;justify-content:space-between;align-items:center;gap:14px">
+  <div style="display:flex;align-items:center;gap:12px;min-width:0">
+    <a class="back" href="{{ url_for('admin_courses') }}">‹ 返回课程管理</a>
+    <h1>{{ '编辑课程' if co else '新建课程' }}</h1>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px">
+    <a class="btn btn-ghost" href="{{ url_for('home') }}">← 返回前台</a>
+    <a class="btn" href="{{ url_for('admin_logout') }}">退出</a>
+  </div>
+</div>
+
+{# 课程基本信息：仅「新建课程」时需要（编辑页已取消此卡片，课程名称等信息改由每张视频卡片承载）。 #}
+{% if not co %}
+<form method="post" action="{{ url_for('admin_course_new') }}"
+      class="admin-form admin-form-inline card-pad form-half">
+  <input type="hidden" name="_section" value="info">
+  <label>课程名称</label>
+  <input name="title" placeholder="如 立项制度" required>
+  <label>所属分类</label>
+  <input name="category_name" value="{{ cat_name }}" placeholder="如 财务" required>
+  <label>课程简介</label>
+  <input name="desc" class="w-grow" placeholder="课程说明">
+  <label>排序</label>
+  <input name="sort" value="0" class="w-sm">
+  <label class="chk"><input type="checkbox" name="required"> 标记为必修</label>
+  <button class="btn btn-primary" type="submit">保存</button>
+</form>
+{% endif %}
+
+{% if co %}
+<section class="section">
+  <h2 class="section-title">课程内容（视频 / 课件）</h2>
+
+  <form method="post" action="{{ url_for('admin_course_edit', cid=co.id) }}"
+        enctype="multipart/form-data"
+        class="admin-form card-pad form-narrow">
+    <input type="hidden" name="_section" value="meta">
+    <p class="form-tip">
+      填写本批次的 <b>课程名称 / 主讲人 / 录制时间</b>，再选择要上传的视频与课件一起保存；
+      同一批文件共用这组信息，上传后可在下方每张卡片「✎ 修改信息」里单独调整。
+    </p>
+    <div class="form-hrow">
+      <label>课程名称</label>
+      <input name="course_title" placeholder="如 立项制度">
+    </div>
+    <div class="form-hrow">
+      <label>主讲人</label>
+      <input name="lecturer" placeholder="如 张三（培训部）">
+    </div>
+    <div class="form-hrow">
+      <label>录制时间</label>
+      <input type="date" name="record_time">
+    </div>
+    <div class="form-hrow">
+      <label>上传视频</label>
+      <input type="file" name="video" accept=".mp4,.webm,.mov,.m4v,.ogg" multiple>
+    </div>
+    <div class="form-hrow">
+      <label>上传课件</label>
+      <input type="file" name="doc" accept=".pdf,.ppt,.pptx,.doc,.docx,.xls,.xlsx,.txt,.md" multiple>
+    </div>
+    <div class="form-hrow">
+      <label>排序</label>
+      <input name="sort" value="0" class="w-sm">
+    </div>
+    <button class="btn btn-primary" type="submit">保存</button>
+  </form>
+
+  <div class="mat-manage" style="margin-top:18px">
+    <h3 class="sub-title">课程管理</h3>
+    {% if mats %}
+    <div class="course-cards">
+      {% for m in mats %}
+      {% if m.type == 'video' %}
+      {% set vtitle = m.course_title or co.title %}
+      <div class="course-card">
+        <div class="course-card-head">
+          <span class="mat-type">🎬</span>
+          <span class="course-card-title" title="{{ vtitle }}">{{ vtitle }}</span>
+          <a class="mini" href="{{ url_for('uploads', filename=m.file_path) }}" download>下载</a>
+          <form method="post" action="{{ url_for('admin_material_delete', mid=m.id) }}" style="display:inline"
+                data-busy="删除中…" data-ok="✓ 已删除"
+                onsubmit="return confirm('确认删除该素材？')">
+            <button class="mini danger" type="submit">删除</button>
+          </form>
+        </div>
+        <div class="course-card-media">
+          <video src="{{ url_for('uploads', filename=m.file_path) }}" controls preload="metadata"></video>
+        </div>
+        <div class="course-card-meta">
+          <div><b>课程名称：</b>{{ vtitle }}</div>
+          <div><b>主讲人：</b>{{ m.lecturer or co.lecturer or '—' }}</div>
+          <div><b>录制时间：</b>{{ m.record_time or co.record_time or '—' }}</div>
+        </div>
+        <details class="card-meta-edit" data-mid="{{ m.id }}">
+          <summary>✎ 修改信息</summary>
+          <form method="post" action="{{ url_for('admin_videos_meta', cid=co.id) }}"
+                class="card-meta-form" data-mid="{{ m.id }}" data-ok="✓ 已保存">
+            {# 用隐藏字段标识“只保存这一条”，不依赖被点的按钮：
+              这样即使脚本没加载、或按钮被禁用，浏览器原生提交也能正确只改本视频。 #}
+            <input type="hidden" name="only" value="{{ m.id }}">
+            <label>课程名称<input name="t_{{ m.id }}" value="{{ m.course_title or co.title or '' }}"
+                              placeholder="{{ co.title }}"></label>
+            <label>主讲人<input name="l_{{ m.id }}" value="{{ m.lecturer or co.lecturer or '' }}"
+                            placeholder="{{ co.lecturer or '主讲人' }}"></label>
+            <label>录制时间<input type="date" name="r_{{ m.id }}"
+                              value="{{ m.record_time or co.record_time or '' }}"></label>
+            <label>排序<input type="number" name="s_{{ m.id }}" value="{{ m.sort or 0 }}" title="数字越小越靠前"></label>
+            <button class="mini card-meta-save" type="submit">保存</button>
+          </form>
+        </details>
+        {% if m.atts %}
+        <div class="course-card-atts">
+          <button type="button" class="atts-toggle" aria-expanded="false">
+            <span>📎 {{ m.atts|length }} 个附件</span><span class="atts-caret">▾</span>
+          </button>
+          <div class="atts-body" hidden>
+            {% for a in m.atts %}
+            <div class="attach-row">
+              <span class="mat-type">📄</span>
+              <a class="attach-name" href="{{ url_for('uploads', filename=a.preview_path or a.file_path) }}"
+                 target="_blank" title="{{ a.title }}">{{ a.title }}</a>
+              <a class="icon-btn" href="{{ url_for('uploads', filename=a.file_path) }}" download title="下载">↓</a>
+              <form method="post" action="{{ url_for('admin_material_delete', mid=a.id) }}" style="display:inline"
+                    data-busy="删除中…" data-ok="✓ 已删除"
+                    onsubmit="return confirm('确认删除该附件？')">
+                <button class="icon-btn danger" type="submit" title="删除">×</button>
+              </form>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+      </div>
+      {% else %}
+      <div class="course-card">
+        <div class="course-card-head">
+          <span class="mat-type">📄</span>
+          <span class="course-card-title" title="{{ m.title }}">{{ m.title }}</span>
+          <a class="mini" href="{{ url_for('uploads', filename=m.file_path) }}" download>下载</a>
+          <form method="post" action="{{ url_for('admin_material_delete', mid=m.id) }}" style="display:inline"
+                data-busy="删除中…" data-ok="✓ 已删除"
+                onsubmit="return confirm('确认删除该素材？')">
+            <button class="mini danger" type="submit">删除</button>
+          </form>
+        </div>
+        <div class="course-card-file">📄 课件文件 · {{ m.title }}</div>
+        <div class="course-card-meta">
+          <div><b>课程名称：</b>{{ m.course_title or co.title }}</div>
+          <div><b>主讲人：</b>{{ m.lecturer or co.lecturer or '—' }}</div>
+          <div><b>录制时间：</b>{{ m.record_time or co.record_time or '—' }}</div>
+        </div>
+      </div>
+      {% endif %}
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">尚未上传内容</div>
+    {% endif %}
+  </div>
+
+</section>
+{% endif %}
+{% endblock %}
+
+{% block script %}
+<script>window.KB_MAX_MB = {{ max_upload_mb }};</script>
+<script src="{{ url_for('static', filename='js/admin-upload.js') }}"></script>
+<script>
+(function(){
+  // 直接打开本页（不经后台面板）时，由这里负责：
+  // 必填项填完才允许保存 + 上传进度条 + 提交后刷新。
+  // 从后台面板点进来时表单由面板脚本接管，本段不参与。
+  window.kbBindRequired(document);
+  // 重新载入后，把刚保存过的那个视频的「✎ 修改信息」重新展开，方便接着改下一个
+  var openMid = sessionStorage.getItem('kbMetaMid');
+  if(openMid){
+    var box = document.querySelector('.card-meta-edit[data-mid="' + openMid + '"]');
+    if(box){ box.open = true; box.scrollIntoView({block:'center'}); }
+    sessionStorage.removeItem('kbMetaMid');
+  }
+  Array.prototype.forEach.call(
+    document.querySelectorAll('form.admin-form, form.card-meta-form'), function(f){
+    if(!f.action) return;
+    f.addEventListener('submit', function(ev){
+      ev.preventDefault();
+      var mid = f.getAttribute('data-mid');
+      if(mid){ sessionStorage.setItem('kbMetaMid', mid); }
+      window.kbFormPost(f, {submitter: ev.submitter}).then(function(){ location.reload(); })
+        .catch(function(){ /* 失败提示已在 kbFormPost 内给出 */ });
+    });
+  });
+})();
+</script>
+{% endblock %}

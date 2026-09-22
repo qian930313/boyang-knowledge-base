@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% set hide_topbar = true %}
+{% block title %}编辑分类 · 企业知识库{% endblock %}
+{% block body %}
+<div class="page-head" style="display:flex;justify-content:space-between;align-items:center;gap:14px">
+  <div style="display:flex;align-items:center;gap:12px;min-width:0">
+    <a class="back" href="{{ url_for('admin_categories') }}">‹ 返回类型管理</a>
+    <h1>编辑分类</h1>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px">
+    <a class="btn btn-ghost" href="{{ url_for('home') }}">← 返回前台</a>
+    <a class="btn" href="{{ url_for('admin_logout') }}">退出</a>
+  </div>
+</div>
+
+<section class="module">
+  <div class="module-head"><span class="module-no">✎</span> 编辑「{{ c.name }}」
+    <span class="module-sub">分类信息</span>
+  </div>
+  <div class="module-body">
+    <form method="post" action="{{ url_for('admin_category_edit', cid=c.id) }}" class="admin-form admin-form-inline">
+      <span class="fld">
+        <label>类型名称</label>
+        <input name="name" value="{{ c.name }}" placeholder="如：营销" required>
+      </span>
+      <span class="fld wide">
+        <label>简介</label>
+        <input name="intro" value="{{ c.intro or '' }}" placeholder="一句话说明该分类（可留空）">
+      </span>
+      <span class="fld">
+        <label>排序</label>
+        <input name="sort" class="w-sm" value="{{ c.sort }}" placeholder="0">
+      </span>
+      <button class="btn btn-primary" type="submit">保存修改</button>
+      <a class="btn" href="{{ url_for('admin_categories') }}">取消</a>
+    </form>
+  </div>
+</section>
+
+<section class="module">
+  <div class="module-head"><span class="module-no">🗑</span> 删除分类
+    <span class="module-sub">不可恢复</span>
+  </div>
+  <div class="module-body">
+    <p class="warn-text">删除后该分类将从系统移除。若分类下仍有课程，需先将课程移至其他分类或删除课程。</p>
+    <form method="post" action="{{ url_for('admin_category_delete', cid=c.id) }}"
+          onsubmit="return confirm('确定删除分类「{{ c.name }}」？此操作不可恢复。');">
+      <button class="btn btn-danger" type="submit">删除该分类</button>
+    </form>
+  </div>
+</section>
+{% endblock %}

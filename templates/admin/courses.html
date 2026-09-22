@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% set hide_topbar = true %}
+{% block title %}课程管理 · 企业知识库{% endblock %}
+{% block body %}
+<div class="page-head" style="display:flex;justify-content:space-between;align-items:center;gap:14px">
+  <h1>02 课程管理</h1>
+  <div style="display:flex;align-items:center;gap:8px">
+    <a class="btn btn-ghost" href="{{ url_for('home') }}">← 返回前台</a>
+    <a class="btn" href="{{ url_for('admin_logout') }}">退出</a>
+  </div>
+</div>
+
+<section class="module">
+  <div class="module-head"><span class="module-no">02</span> 课程列表
+    <span class="module-sub">共 {{ total_courses }} 门课程</span>
+    <a class="btn btn-primary module-act" href="{{ url_for('admin_course_new') }}">+ 新建课程</a>
+  </div>
+  <div class="module-body">
+    <div class="admin-grid">
+      {% for c in cats %}
+      <div class="admin-cat">
+        <div class="admin-cat-name">{{ c.icon }} {{ c.name }}</div>
+        {% for co in c.courses %}
+        <div class="admin-course">
+          <div class="admin-course-name">{{ co.title }}</div>
+          <div class="admin-course-acts">
+            <a class="mini" href="{{ url_for('admin_course_edit', cid=co.id) }}">编辑/素材</a>
+          </div>
+        </div>
+        {% else %}
+        <div class="empty">暂无课程</div>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+{% endblock %}

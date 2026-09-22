@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+data/
+uploads/
+backups/
+server.log
+.workbuddy/
+.env
+_shot/
+_tmp/
+*.db

@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% set hide_topbar = true %}
+{% block title %}测验配置 · 企业知识库{% endblock %}
+{% block body %}
+<div class="page-head" style="display:flex;justify-content:space-between;align-items:center;gap:14px">
+  <div style="display:flex;align-items:center;gap:12px;min-width:0">
+    <a class="back" href="{{ url_for('admin_course_edit', cid=co.id) }}">‹ 返回</a>
+    <h1>📝 测验配置</h1>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px">
+    <a class="btn btn-ghost" href="{{ url_for('home') }}">← 返回前台</a>
+    <a class="btn" href="{{ url_for('admin_logout') }}">退出</a>
+  </div>
+</div>
+<p class="quiz-tip">{{ co.title }}</p>
+
+<section class="section">
+  <h2 class="section-title">测验设置</h2>
+  <form method="post" action="{{ url_for('admin_quiz', cid=co.id) }}" class="admin-form card-pad form-narrow">
+    <input type="hidden" name="action" value="meta">
+    <label>测验标题</label>
+    <input name="title" value="{{ qz.title if qz else '课程测验' }}">
+    <label>合格分数线（分）</label>
+    <input name="pass_score" value="{{ qz.pass_score if qz else 60 }}" style="max-width:120px">
+    <button class="btn btn-primary" type="submit">保存设置</button>
+  </form>
+</section>
+
+<section class="section">
+  <h2 class="section-title">已有题目（{{ questions|length }}）</h2>
+  {% for q in questions %}
+  <div class="q-block">
+    <div class="q-stem">{{ loop.index }}. {{ q.stem }}
+      <span class="q-type">{{ '单选' if q.type=='single' else ('多选' if q.type=='multiple' else '判断') }}</span>
+    </div>
+    <ol class="opt-list">
+      {% for opt in q.options %}
+      <li class="{{ 'correct' if loop.index0 in q.answer }}">{{ opt }}</li>
+      {% endfor %}
+    </ol>
+    <form method="post" action="{{ url_for('admin_quiz', cid=co.id) }}" style="display:inline" onsubmit="return confirm('确认删除该题目？')">
+      <input type="hidden" name="action" value="del">
+      <input type="hidden" name="qid" value="{{ q.id }}">
+      <button class="mini danger" type="submit">删除</button>
+    </form>
+  </div>
+  {% else %}
+  <div class="empty">暂未添加题目</div>
+  {% endfor %}
+</section>
+
+<section class="section">
+  <h2 class="section-title">添加题目</h2>
+  <form method="post" action="{{ url_for('admin_quiz', cid=co.id) }}" class="admin-form card-pad form-narrow">
+    <input type="hidden" name="action" value="add">
+    <label>题型</label>
+    <select name="qtype">
+      <option value="single">单选题</option>
+      <option value="multiple">多选题</option>
+      <option value="judge">判断题</option>
+    </select>
+    <label>题干</label>
+    <textarea name="stem" rows="2" placeholder="请输入题目" required></textarea>
+    <label>选项（每行一个）</label>
+    <textarea name="options" rows="4" placeholder="选项一&#10;选项二&#10;选项三&#10;选项四"></textarea>
+    <label>正确答案</label>
+    <input name="answer" placeholder="单选/判断填行号如 1；多选填 1,3">
+    <label>分值</label>
+    <input name="qscore" value="10" style="max-width:100px">
+    <button class="btn btn-primary" type="submit">添加题目</button>
+  </form>
+</section>
+{% endblock %}

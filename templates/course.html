@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}{{ co.title }} · 企业知识库{% endblock %}
+{% block body %}
+<div class="page-head">
+  <a class="back" href="{{ url_for('category', key=cat.key) }}">‹ 返回</a>
+</div>
+
+<h2 class="section-title">课程内容</h2>
+<div class="mat-list">
+  {% for m in mats %}
+  {% if m.type == 'video' %}
+  {% set vtitle = m.course_title or co.title %}
+  <div class="course-card">
+    <div class="course-card-head">
+      <span class="mat-type">🎬</span>
+      <a class="course-card-title" href="{{ url_for('material', mid=m.id) }}" title="{{ vtitle }}">{{ vtitle }}</a>
+      <span class="mat-status status-{{ m.status }}">
+        {{ '已完成' if m.status=='done' else ('学习中' if m.status=='in_progress' else '未学') }}
+      </span>
+      <a class="mini" href="{{ url_for('uploads', filename=m.file_path) }}" download>下载</a>
+    </div>
+    <div class="course-card-media">
+      <video src="{{ url_for('uploads', filename=m.file_path) }}" controls preload="metadata"></video>
+    </div>
+    <div class="course-card-meta">
+      <div><b>课程名称：</b>{{ vtitle }}</div>
+      <div><b>主讲人：</b>{{ m.lecturer or co.lecturer or '—' }}</div>
+      <div><b>录制时间：</b>{{ m.record_time or co.record_time or '—' }}</div>
+    </div>
+      {% if m.atts %}
+      <div class="course-card-atts">
+        <button type="button" class="atts-toggle" aria-expanded="false">
+          <span>📎 {{ m.atts|length }} 个附件</span><span class="atts-caret">▾</span>
+        </button>
+        <div class="atts-body" hidden>
+          {% for a in m.atts %}
+          <div class="attach-row">
+            <span class="mat-type">📄</span>
+            <a class="attach-name" href="{{ url_for('material', mid=a.id) }}" title="{{ a.title }}">{{ a.title }}</a>
+            <a class="icon-btn" href="{{ url_for('uploads', filename=a.file_path) }}" download title="下载">↓</a>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+    </div>
+  {% else %}
+  <a class="mat-item" href="{{ url_for('material', mid=m.id) }}">
+    <span class="mat-type">{{ '🎬' if m.type=='video' else ('🔗' if m.type=='link' else '📄') }}</span>
+    <span class="mat-title">{{ m.title }}</span>
+    <span class="mat-status status-{{ m.status }}">
+      {{ '已完成' if m.status=='done' else ('学习中' if m.status=='in_progress' else '未学') }}
+    </span>
+  </a>
+  {% endif %}
+  {% else %}
+  <div class="empty">课程暂未上传内容，请联系管理员</div>
+  {% endfor %}
+</div>
+
+{% endblock %}

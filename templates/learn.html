@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}{{ (m.course_title or co.title) if (m.type == 'video' and co) else m.title }} · 企业知识库{% endblock %}
+{% block body %}
+<div class="page-head">
+  <a class="back" href="{{ url_for('course', cid=co.id) }}">‹ 返回课程</a>
+  <h1>{{ (m.course_title or co.title) if (m.type == 'video' and co) else m.title }}</h1>
+</div>
+
+<div class="learn-player">
+  {% if m.type == 'video' %}
+    <video id="player" controls preload="metadata"
+           src="{{ url_for('uploads', filename=m.file_path) }}"></video>
+    <div id="vidErr" class="doc-fallback" style="display:none">
+      <p>当前环境无法播放此视频格式（建议使用 MP4 / H.264 编码）。</p>
+      <a class="btn" href="{{ url_for('uploads', filename=m.file_path) }}" download>下载视频</a>
+    </div>
+
+  {% elif m.type == 'doc' and m.preview_path %}
+    <iframe class="doc-frame" src="{{ url_for('uploads', filename=m.preview_path) }}"></iframe>
+
+  {% elif m.type == 'doc' %}
+    <div class="doc-fallback">
+      <p>当前环境暂不支持在线预览该格式，请下载后查看。</p>
+      <a class="btn" href="{{ url_for('uploads', filename=m.file_path) }}" download>下载课件</a>
+    </div>
+
+  {% elif m.type == 'link' %}
+    <iframe class="doc-frame" src="{{ m.url }}"></iframe>
+  {% endif %}
+</div>
+
+<div class="learn-actions">
+  <button class="btn btn-primary" id="finishBtn">完成本节学习</button>
+  {% if m.type == 'doc' or m.type == 'link' %}
+  <a class="btn" href="{{ url_for('uploads', filename=m.file_path) }}" download>下载原文件</a>
+  {% endif %}
+</div>
+
+{% if m.type == 'video' and attach %}
+<div class="learn-attach">
+  <div class="attach-head">📎 本节附件（{{ attach|length }}）</div>
+  {% for a in attach %}
+  <div class="attach-row">
+    <span class="mat-type">📄</span>
+    <span class="attach-name">{{ a.title }}</span>
+    <a class="btn" href="{{ url_for('material', mid=a.id) }}">查看课件</a>
+    <a class="btn" href="{{ url_for('uploads', filename=a.file_path) }}" download>下载课件</a>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}
+
+{% block script %}
+<script>
+const MID = {{ m.id }};
+function markDone(){
+  fetch("{{ url_for('api_progress') }}", {
+    method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"},
+    body:"mid="+MID+"&status=done&pct=100"
+  }).then(()=>{ location.href = "{{ url_for('course', cid=co.id) }}"; });
+}
+document.getElementById("finishBtn").addEventListener("click", markDone);
+
+{% if m.type == 'video' %}
+const v = document.getElementById("player");
+if (v){
+  v.addEventListener("error", function(){
+    var box = document.getElementById("vidErr");
+    if (box) box.style.display = "block";
+  });
+  v.addEventListener("ended", ()=>{
+    fetch("{{ url_for('api_progress') }}", {
+      method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"},
+      body:"mid="+MID+"&status=done&pct=100"
+    });
+    document.getElementById("finishBtn").textContent = "本节已完成 ✓ 返回课程";
+  });
+}
+{% endif %}
+</script>
+{% endblock %}

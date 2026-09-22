@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% set hide_topbar = true %}
+{% block title %}类型管理 · 企业知识库{% endblock %}
+{% block body %}
+<div class="page-head" style="display:flex;justify-content:space-between;align-items:center;gap:14px">
+  <h1>01 类型管理</h1>
+  <div style="display:flex;align-items:center;gap:8px">
+    <a class="btn btn-ghost" href="{{ url_for('home') }}">← 返回前台</a>
+    <a class="btn" href="{{ url_for('admin_logout') }}">退出</a>
+  </div>
+</div>
+
+<section class="module">
+  <div class="module-head"><span class="module-no">01</span> 新增分类
+    <span class="module-sub">课程分类（营销 / 财务 / 人事…）</span>
+  </div>
+  <div class="module-body">
+    <form method="post" action="{{ url_for('admin_category_new') }}" class="admin-form admin-form-inline">
+      <label>类型名称</label>
+      <input name="name" placeholder="如：营销" required>
+      <label>排序</label>
+      <input name="sort" class="w-sm" placeholder="0" value="0">
+      <button class="btn btn-primary" type="submit">添加分类</button>
+    </form>
+  </div>
+</section>
+
+<section class="module">
+  <div class="module-head"><span class="module-no">≡</span> 已有分类
+    <span class="module-sub">{{ cats|length }} 个</span>
+  </div>
+  <div class="module-body">
+    <div class="cat-list">
+      {% for c in cats %}
+      <div class="cat-row">
+        <span class="cat-ic">{{ c.icon }}</span>
+        <span class="cat-nm">{{ c.name }}</span>
+        {% if c.intro %}<span class="cat-intro" title="{{ c.intro }}">{{ c.intro }}</span>{% endif %}
+        <span class="cat-meta">排序 {{ c.sort }}</span>
+        <span class="cat-acts">
+          <a class="mini" href="{{ url_for('admin_category_edit', cid=c.id) }}">编辑</a>
+          <form method="post" action="{{ url_for('admin_category_delete', cid=c.id) }}"
+                onsubmit="return confirm('删除分类「{{ c.name }}」？');" style="display:inline">
+            <button class="mini danger" type="submit">删除</button>
+          </form>
+        </span>
+      </div>
+      {% else %}
+      <div class="empty">还没有分类</div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+{% endblock %}

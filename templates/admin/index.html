@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% set hide_topbar = true %}
+{% block title %}管理后台 · 企业知识库{% endblock %}
+{% block body %}
+<div class="page-head" style="display:flex;justify-content:space-between;align-items:center;gap:14px">
+  <div style="display:flex;align-items:center;gap:12px;min-width:0">
+    <img src="{{ url_for('static', filename='img/logo.png') }}" alt="博阳能源" style="height:34px;width:auto">
+    <h1 style="margin:0">管理后台</h1>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px">
+    <a class="btn btn-ghost" href="{{ url_for('home') }}">← 返回前台</a>
+    <a class="btn" href="{{ url_for('admin_logout') }}">退出</a>
+  </div>
+</div>
+
+<div class="entry-grid" id="entry-grid">
+  <a class="entry-card" href="{{ url_for('admin_categories') }}" data-url="{{ url_for('admin_categories') }}">
+    <span class="entry-no">01</span>
+    <div class="entry-title">类型管理</div>
+    <div class="entry-desc">课程分类（营销 / 财务 / 人事…）</div>
+    <div class="entry-foot"><span>{{ total_cats }} 个分类</span><span class="entry-arrow">查看 ›</span></div>
+  </a>
+
+  <a class="entry-card" href="{{ url_for('admin_courses') }}" data-url="{{ url_for('admin_courses') }}">
+    <span class="entry-no">02</span>
+    <div class="entry-title">课程管理</div>
+    <div class="entry-desc">课程内容、视频与课件、课后测验</div>
+    <div class="entry-foot"><span>{{ total_courses }} 门课程</span><span class="entry-arrow">查看 ›</span></div>
+  </a>
+
+  <a class="entry-card" href="{{ url_for('admin_users') }}" data-url="{{ url_for('admin_users') }}">
+    <span class="entry-no">03</span>
+    <div class="entry-title">学院学习管理</div>
+    <div class="entry-desc">学员账号、学习进度与证书</div>
+    <div class="entry-foot"><span>{{ total_users }} 名学员 · {{ total_certs }} 张证书</span><span class="entry-arrow">查看 ›</span></div>
+  </a>
+</div>
+
+<section class="admin-panel" id="admin-panel">
+  <div class="panel-hint">👆 点击上方模块，内容将显示在此处</div>
+</section>
+{% endblock %}
+
+{% block script %}
+<script>window.KB_MAX_MB = {{ max_upload_mb }};</script>
+<script src="{{ url_for('static', filename='js/admin-upload.js') }}"></script>
+<script>
+(function(){
+  var grid = document.getElementById('entry-grid');
+  var panel = document.getElementById('admin-panel');
+  var panelUrl = null;
+  var toast = window.kbToast;
+
+  function isLocal(href){
+    return href && href.charAt(0) === '/' && href.indexOf('/admin/logout') !== 0
+           && href.indexOf('/static') !== 0 && href.indexOf('/login') !== 0;
+  }
+  function resetPanel(){
+    document.querySelectorAll('.entry-card').forEach(function(c){c.classList.remove('active');});
+    panel.innerHTML = '<div class="panel-hint">👆 点击上方模块，内容将显示在此处</div>';
+  }
+  function fill(html){
+    var doc = new DOMParser().parseFromString(html, 'text/html');
+    var content = doc.querySelector('.content');
+    panel.innerHTML = content ? content.innerHTML : html;
+    bindPanel();
+    panel.scrollIntoView({behavior:'smooth', block:'nearest'});
+  }
+  function bindPanel(){
+    // 面板内后台链接就地加载；指向后台首页的返回链接则收起面板
+    panel.querySelectorAll('a').forEach(function(a){
+      var href = a.getAttribute('href');
+      if(a.target === '_blank' || a.hasAttribute('download') || !isLocal(href)) return;
+      a.addEventListener('click', function(ev){
+        ev.preventDefault();
+        if(href === '{{ url_for("admin_index") }}' || href === '/admin/'){ resetPanel(); return; }
+        load(href, null);
+      });
+    });
+    // 必填表单：所有必填项填完才允许保存
+    window.kbBindRequired(panel);
+    // 面板内表单提交就地提交并刷新当前模块（含文件时显示真实上传进度）
+    panel.querySelectorAll('form').forEach(function(f){
+      // 兜底：万一上一轮请求异常，按钮被留在禁用态，这里恢复可点
+      f.querySelectorAll('button[type=submit]').forEach(function(b){ b.disabled = false; });
+      f.addEventListener('submit', function(ev){
+        if(ev.defaultPrevented) return;  // inline onsubmit 已取消（如 confirm 选“取消”）
+        ev.preventDefault();
+        var submitter = ev.submitter;
+        // 未写 action 的表单，回退到当前面板 URL（避免 POST 到文档 URL 触发 405）
+        window.kbFormPost(f, {url: f.getAttribute('action') || panelUrl, submitter: submitter}).then(function(html){
+          var doc = new DOMParser().parseFromString(html, 'text/html');
+          var c = doc.querySelector('.content');
+          panel.innerHTML = c ? c.innerHTML : html;
+          bindPanel();
+          // 「逐个保存」后回到该视频卡片并重新展开，方便接着改下一个
+          var mid = f.getAttribute('data-mid');
+          if(mid){
+            var box = panel.querySelector('.card-meta-edit[data-mid="' + mid + '"]');
+            if(box){ box.open = true; box.scrollIntoView({block:'center'}); }
+          }
+          toast(f.dataset.ok || '✓ 保存成功');
+        }).catch(function(){ /* 失败提示已在 kbFormPost 内给出 */ });
+      });
+    });
+  }
+  function load(url, card){
+    panelUrl = url;
+    // 只有点顶部模块卡片时才切换高亮；模块内二级跳转保持当前卡片点亮
+    if(card){
+      document.querySelectorAll('.entry-card').forEach(function(c){c.classList.remove('active');});
+      card.classList.add('active');
+    }
+    panel.innerHTML = '<div class="panel-loading">加载中…</div>';
+    fetch(url, {credentials:'same-origin', headers:{'X-Requested-With':'fetch'}})
+      .then(function(r){return r.text();})
+      .then(fill)
+      .catch(function(){
+        panel.innerHTML = '<div class="panel-hint">加载失败，请 <a href="'+url+'">点击进入</a></div>';
+      });
+  }
+  grid.addEventListener('click', function(e){
+    var card = e.target.closest('.entry-card');
+    if(!card) return;
+    e.preventDefault();
+    load(card.getAttribute('data-url'), card);
+  });
+})();
+</script>
+{% endblock %}

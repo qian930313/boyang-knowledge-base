@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% set hide_topbar = true %}
+{% block title %}学院学习管理 · 企业知识库{% endblock %}
+{% block body %}
+<div class="page-head" style="display:flex;justify-content:space-between;align-items:center;gap:14px">
+  <h1>03 学院学习管理</h1>
+  <div style="display:flex;align-items:center;gap:8px">
+    <a class="btn btn-ghost" href="{{ url_for('home') }}">← 返回前台</a>
+    <a class="btn" href="{{ url_for('admin_logout') }}">退出</a>
+  </div>
+</div>
+
+<div class="stat-row">
+  <div class="stat"><div class="stat-n">{{ users|length }}</div><div class="stat-l">学员总数</div></div>
+  <div class="stat"><div class="stat-n">{{ total_certs }}</div><div class="stat-l">已获证书</div></div>
+</div>
+
+  <div class="mat-list">
+  {% for u in users %}
+  <div class="mat-item">
+    <span class="mat-type">👤</span>
+    <span class="mat-title">{{ u.name }}{% if u.dept %}<small style="color:var(--sub)"> · {{ u.dept }}</small>{% endif %}</span>
+    <span class="mat-status status-done">{{ u.cert_count }} 证</span>
+    <a class="mini" href="{{ url_for('admin_user_detail', uid=u.id) }}">查看进度</a>
+  </div>
+  {% else %}
+  <div class="empty">还没有学员登录过</div>
+  {% endfor %}
+</div>
+{% endblock %}

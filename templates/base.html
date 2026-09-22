@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>{% block title %}企业知识库{% endblock %}</title>
+<link rel="icon" href="{{ url_for('static', filename='img/logo.png') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+<div class="app">
+  {% if not hide_topbar %}
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="{{ url_for('home') }}">
+        <img class="brand-logo" src="{{ url_for('static', filename='img/logo.png') }}" alt="博阳能源 BROAD SUN">
+        <span class="brand-text">企业知识库</span>
+      </a>
+      <div class="topbar-right">
+        {% if user %}
+        <a class="topnav-btn {{ 'active' if request.endpoint=='home' }}" href="{{ url_for('home') }}">返回首页</a>
+        <a class="topnav-btn {{ 'active' if request.endpoint=='my' }}" href="{{ url_for('my') }}">我的</a>
+        {% endif %}
+        <a class="btn-admin" href="{{ url_for('admin_login') }}">⚙ 管理后台</a>
+        {% if user %}
+        <span class="user-chip">{{ user.name }}{% if admin %} · 管理员{% endif %}</span>
+        <a class="topnav-btn topnav-logout" href="{{ url_for('logout') }}">退出</a>
+        {% endif %}
+      </div>
+    </div>
+  </header>
+  {% endif %}
+
+  <main class="content{% if hide_topbar %} no-topbar{% endif %}">
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <div class="flash">
+          {% for m in messages %}<div>{{ m }}</div>{% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+    {% block body %}{% endblock %}
+  </main>
+</div>
+<script>
+// 关联附件：默认收起，点标题行展开/收起（前后台通用）
+document.addEventListener("click", function (e) {
+  var btn = e.target.closest && e.target.closest(".atts-toggle");
+  if (!btn) return;
+  var box = btn.parentNode.querySelector(".atts-body");
+  if (!box) return;
+  var open = box.hasAttribute("hidden");
+  if (open) { box.removeAttribute("hidden"); btn.classList.add("open"); }
+  else { box.setAttribute("hidden", ""); btn.classList.remove("open"); }
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+});
+
+// 提交入口兜底：admin-upload.js 万一没加载成功（缓存 / 网络），
+// 也不能让保存按钮「点了没反应」——退回浏览器原生提交，数据照样落库。
+window.kbFormPost = function (form, opts) {
+  if (typeof window.kbSubmitForm === "function") {
+    try { return window.kbSubmitForm(form, opts); }
+    catch (err) { /* 交给下面的原生提交 */ }
+  }
+  HTMLFormElement.prototype.submit.call(form);
+  return Promise.reject(new Error("native-fallback"));
+};
+if (typeof window.kbBindRequired !== "function") {
+  window.kbBindRequired = function () {};   // 避免面板初始化因缺函数而中断
+}
+</script>
+{% block script %}{% endblock %}
+</body>
+</html>

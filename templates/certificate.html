@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% set hide_topbar = true %}
+{% block title %}结业证书 · 企业知识库{% endblock %}
+{% block body %}
+<div class="cert-wrap">
+  <div class="cert">
+    <img class="cert-logo" src="{{ url_for('static', filename='img/logo.png') }}" alt="博阳能源 BROAD SUN">
+    <div class="cert-head">企业知识库</div>
+    <div class="cert-title">结业证书</div>
+    <div class="cert-sub">CERTIFICATE OF COMPLETION</div>
+    <div class="cert-body">
+      <p>兹证明</p>
+      <div class="cert-name">{{ user.name }}</div>
+      <p>已完成《{{ co.title }}》课程的全部学习内容并通过考核，特发此证。</p>
+    </div>
+    <div class="cert-foot">
+      <div>证书编号：{{ cert.no }}</div>
+      <div>颁发日期：{{ cert.issued_at|cert_date }}</div>
+    </div>
+    <div class="cert-seal">BOYANG</div>
+  </div>
+  <a class="btn" href="{{ url_for('my') }}">返回</a>
+</div>
+{% endblock %}

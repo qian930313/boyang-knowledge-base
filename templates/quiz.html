@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}测验 · {{ co.title }}{% endblock %}
+{% block body %}
+<div class="page-head">
+  <a class="back" href="{{ url_for('course', cid=co.id) }}">‹ 返回</a>
+  <h1>📝 {{ qz.title }}</h1>
+</div>
+<p class="quiz-tip">合格线：{{ qz.pass_score }} 分 · 共 {{ questions|length }} 题</p>
+
+<form method="post" class="quiz-form">
+  {% for q in questions %}
+  <div class="q-block">
+    <div class="q-stem">{{ loop.index }}. {{ q.stem }}
+      <span class="q-type">{{ '单选' if q.type=='single' else ('多选' if q.type=='multiple' else '判断') }}</span>
+    </div>
+    <div class="q-opts">
+      {% for opt in q.options %}
+      <label class="opt">
+        <input type="{{ 'radio' if q.type!='multiple' else 'checkbox' }}" name="q_{{ q.id }}"
+               value="{{ loop.index0 }}">
+        <span>{{ opt }}</span>
+      </label>
+      {% endfor %}
+    </div>
+  </div>
+  {% endfor %}
+  <button class="btn btn-primary" type="submit">提交答卷</button>
+</form>
+{% endblock %}

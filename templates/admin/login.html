@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% set hide_topbar = true %}
+{% block title %}管理员登录 · 企业知识库{% endblock %}
+{% block body %}
+<div class="login-wrap">
+  <div class="login-card">
+    <img class="login-logo" src="{{ url_for('static', filename='img/logo.png') }}" alt="博阳能源 BROAD SUN">
+    <div class="login-title">管理后台</div>
+    <p class="login-tip">请输入管理员密码</p>
+    <form method="post" class="login-form">
+      <input type="password" name="password" placeholder="管理员密码" required>
+      <button class="btn btn-primary" type="submit">登录</button>
+    </form>
+    <a class="quick-user" href="{{ url_for('home') }}">返回前台</a>
+  </div>
+</div>
+{% endblock %}

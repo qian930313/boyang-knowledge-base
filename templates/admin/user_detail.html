@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% set hide_topbar = true %}
+{% block title %}学员学习明细 · 企业知识库{% endblock %}
+{% block body %}
+<div class="page-head" style="display:flex;justify-content:space-between;align-items:center;gap:14px">
+  <div style="display:flex;align-items:center;gap:12px;min-width:0">
+    <a class="back" href="{{ url_for('admin_users') }}">‹ 返回学员管理</a>
+    <h1>👤 {{ u.name }}{% if u.dept %} · {{ u.dept }}{% endif %}</h1>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px">
+    <a class="btn btn-ghost" href="{{ url_for('home') }}">← 返回前台</a>
+    <a class="btn" href="{{ url_for('admin_logout') }}">退出</a>
+  </div>
+</div>
+
+<div class="stat-row">
+  <div class="stat"><div class="stat-n">{{ detail|selectattr('completed')|list|length }}</div><div class="stat-l">已完成课程</div></div>
+  <div class="stat"><div class="stat-n">{{ detail|length }}</div><div class="stat-l">应学课程</div></div>
+  <div class="stat"><div class="stat-n">{{ certs|length }}</div><div class="stat-l">已获证书</div></div>
+</div>
+
+<section class="module">
+  <div class="module-head"><span class="module-no">≡</span> 课程学习明细</div>
+  <div class="module-body">
+    <div class="learn-detail">
+      {% for d in detail %}
+      <div class="ld-row">
+        <div class="ld-cat">{{ d.cat.icon if d.cat else '📁' }} {{ d.cat.name if d.cat else '未分类' }}</div>
+        <div class="ld-name">
+          {{ d.co.title }}
+          {% if d.co.required %}<span class="tag req">必修</span>{% endif %}
+        </div>
+        <div class="progress-line ld-prog">
+          <div class="bar"><div class="bar-fill" style="width:{{ d.done*100/d.total if d.total > 0 else 0 }}%"></div></div>
+          <span class="bar-text">{{ d.done }}/{{ d.total }}</span>
+        </div>
+        <div class="ld-quiz">
+          {% if d.att %}
+            {% if d.att.passed %}<span class="tag ok">测验 {{ d.att.score }}分</span>
+            {% else %}<span class="tag no">测验 {{ d.att.score }}分</span>{% endif %}
+          {% elif d.total > 0 %}
+            <span class="tag">无记录</span>
+          {% else %}<span class="tag">—</span>{% endif %}
+        </div>
+        <div class="ld-cert">
+          {% if d.cert %}<span class="tag ok">🎓 已发证</span>
+          {% elif d.completed %}<span class="tag ok">可发证</span>
+          {% else %}<span class="tag no">未发证</span>{% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
+{% if certs %}
+<section class="module">
+  <div class="module-head"><span class="module-no">🎓</span> 获得的证书</div>
+  <div class="module-body">
+    <div class="cert-list">
+      {% for c in certs %}
+      <a class="cert-item" href="{{ url_for('certificate', cid=c.course_id) }}">
+        <div class="cert-item-name">{{ c.course_title }}</div>
+        <div class="cert-item-no">{{ c.no }}</div>
+      </a>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+{% endif %}
+{% endblock %}

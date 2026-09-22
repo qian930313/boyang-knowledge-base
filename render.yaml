@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: boyang-kb
+    runtime: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "waitress-serve --port=$PORT --call app:app"
+    envVars:
+      - key: KB_DATA_DIR
+        value: /data
+      - key: KB_UPLOAD_DIR
+        value: /data/uploads
+      - key: KB_SECRET_KEY        # 上线前在 Render 控制台填写随机值
+        sync: false
+      - key: KB_ADMIN_PASSWORD    # 上线前在 Render 控制台修改管理员密码
+        sync: false
+    disk:
+      name: kb-data
+      mountPath: /data
+      sizeGB: 1

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}测验结果 · 企业知识库{% endblock %}
+{% block body %}
+<div class="page-head">
+  <a class="back" href="{{ url_for('course', cid=co.id) }}">‹ 返回</a>
+  <h1>测验结果</h1>
+</div>
+
+<div class="result-card {{ 'pass' if att.passed else 'fail' }}">
+  <div class="result-score">{{ att.score }}</div>
+  <div class="result-label">{{ '恭喜，测验通过！' if att.passed else '很遗憾，未达合格线' }}</div>
+  {% if att.passed and cert %}
+    <a class="btn btn-primary" href="{{ url_for('certificate', cid=co.id) }}">🎉 查看证书</a>
+  {% elif att.passed %}
+    <div class="done-badge">证书已发放</div>
+  {% else %}
+    <a class="btn" href="{{ url_for('quiz', cid=co.id) }}">再考一次</a>
+  {% endif %}
+  <a class="btn" href="{{ url_for('course', cid=co.id) }}">返回课程</a>
+</div>
+
+<div class="review">
+  <h2 class="section-title">答题回顾</h2>
+  {% for q in questions %}
+  {% set user_ans = answers.get(q.id|string, []) %}
+  <div class="q-block">
+    <div class="q-stem">{{ loop.index }}. {{ q.stem }}</div>
+    <ul class="review-list">
+      {% for opt in q.options %}
+      <li class="{{ 'correct' if loop.index0 in q.answer else '' }} {{ 'wrong' if (loop.index0 in user_ans) and (loop.index0 not in q.answer) else '' }}">
+        {{ opt }}
+        {% if loop.index0 in q.answer and loop.index0 not in user_ans %}<span class="mark">正确答案</span>{% endif %}
+        {% if loop.index0 in user_ans and loop.index0 not in q.answer %}<span class="mark mark-wrong">你的选择</span>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}
