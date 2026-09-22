@@ -6,6 +6,7 @@ import sqlite3
 import time
 import json
 import config
+import r2store
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -176,6 +177,7 @@ def init_db():
     )
     conn.commit()
     conn.close()
+    r2store.sync_db_to_r2()
 
 
 def now():
@@ -203,6 +205,7 @@ def execute(sql, args=()):
     conn.commit()
     last = cur.lastrowid
     conn.close()
+    r2store.sync_db_to_r2()
     return last
 
 
@@ -211,6 +214,7 @@ def executescript(sql):
     conn.executescript(sql)
     conn.commit()
     conn.close()
+    r2store.sync_db_to_r2()
 
 
 # ---------- 用户 ----------

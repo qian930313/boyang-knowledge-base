@@ -40,6 +40,16 @@ WECOM_TRUST_DOMAIN = os.environ.get("WECOM_TRUST_DOMAIN", "")
 # 是否已启用企业微信身份接入
 WECOM_ENABLED = bool(WECOM_CORP_ID and WECOM_APP_SECRET and WECOM_AGENT_ID)
 
+# ---- Cloudflare R2 对象存储（免费持久化，可选）----
+# 四个变量都填了才会启用（USE_R2）。不填则全部走本地文件，行为不变。
+# 用 R2 后：数据库与上传文件都同步到桶，Render 免费实例重启也不丢数据。
+R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID", "")
+R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID", "")
+R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "")
+R2_BUCKET = os.environ.get("R2_BUCKET", "")
+# 可选：把桶设为公开读后填此值（形如 https://<域名>/<桶名>），文件用直链访问，支持 Range 播放
+R2_PUBLIC_URL = (os.environ.get("R2_PUBLIC_URL", "") or "").rstrip("/")
+
 # 允许的课件/视频文件扩展名
 ALLOWED_VIDEO_EXT = {".mp4", ".webm", ".mov", ".m4v", ".ogg"}
 ALLOWED_DOC_EXT = {".pdf", ".ppt", ".pptx", ".doc", ".docx", ".xls", ".xlsx", ".key", ".txt", ".md"}

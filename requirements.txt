@@ -2,5 +2,6 @@ Flask>=3.0
 Werkzeug>=3.0
 waitress>=2.1
 gunicorn>=21.2
+boto3>=1.28
 # 可选：用于把 Office 文档转成 PDF 以便浏览器内预览（需本机安装 LibreOffice）
 # 无需 pip 安装，程序会自动探测 soffice/libreoffice 是否可用

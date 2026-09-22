@@ -17,6 +17,7 @@ from werkzeug.utils import secure_filename
 import config
 import db
 import wecom
+import r2store
 
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
@@ -24,7 +25,12 @@ app.config["MAX_CONTENT_LENGTH"] = config.MAX_UPLOAD_MB * 1024 * 1024
 
 os.makedirs(config.UPLOAD_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(config.DB_PATH), exist_ok=True)
+# 启用 R2 时，先拉取云端最新数据库（本地是临时文件系统），再初始化、回写
+if r2store.USE_R2:
+    r2store.pull_db_from_r2()
 db.init_db()
+if r2store.USE_R2:
+    r2store.sync_db_to_r2()
 
 
 # ---------------- 全局 ----------------
@@ -570,6 +576,8 @@ def _store_uploads(cid, files, sort, meta_map=None, batch_default=None):
             i += 1
         f.save(dest)
         rel = os.path.relpath(dest, config.UPLOAD_DIR).replace("\\", "/")
+        if r2store.USE_R2:
+            r2store.put_file(rel, dest)
         mtype = "video" if ext in config.ALLOWED_VIDEO_EXT else "doc"
         # 文档尝试转 PDF 以便浏览器内预览
         preview = None
@@ -577,6 +585,8 @@ def _store_uploads(cid, files, sort, meta_map=None, batch_default=None):
             pdf = convert_to_pdf(dest, course_dir)
             if pdf:
                 preview = os.path.relpath(pdf, config.UPLOAD_DIR).replace("\\", "/")
+                if r2store.USE_R2:
+                    r2store.put_file(preview, pdf)
         # 标题用原始文件名（保留中文），便于前台展示
         title = os.path.splitext(raw)[0].strip() or fname
         # 该文件自己的一套信息：优先逐文件填写，其次回退到本批统一信息
@@ -747,6 +757,8 @@ def admin_material_delete(mid):
             except OSError as e:
                 file_warn = True
                 print("[warn] 删除文件失败（已跳过）:", fp, e)
+            if r2store.USE_R2:
+                r2store.delete(p)
     db.execute("DELETE FROM progress WHERE material_id=?", (mid,))
     # 若有视频把它关联为附件，先解除关联，避免前台出现空附件
     db.execute("UPDATE materials SET attach_id=0 WHERE attach_id=?", (mid,))
@@ -854,6 +866,12 @@ def admin_user_detail(uid):
 @app.route("/uploads/<path:filename>")
 def uploads(filename):
     """发送上传文件，支持 HTTP Range（206 分片）——企业微信/iOS 的 <video> 必须依赖 Range 才能播放。"""
+    # R2 模式：直接重定向到对象存储的 URL（直链或预签名），由 R2 处理 Range 分片播放
+    if r2store.USE_R2:
+        url = r2store.get_url(filename)
+        if url:
+            return redirect(url)
+        abort(404)
     filepath = os.path.join(config.UPLOAD_DIR, filename)
     if not os.path.isfile(filepath):
         abort(404)
