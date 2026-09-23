@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ (m.course_title or co.title) if (m.type == 'video' and co) else m.title }} · 企业知识库{% endblock %}
+{% block title %}{{ (m.course_title or co.title) if (m.type == 'video' and co) else m.title }} · 影响培训平台{% endblock %}
 {% block body %}
 <div class="page-head">
   <a class="back" href="{{ url_for('course', cid=co.id) }}">‹ 返回课程</a>
