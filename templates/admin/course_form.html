@@ -35,6 +35,17 @@
 <section class="section">
   <h2 class="section-title">课程内容（视频 / 课件）</h2>
 
+  {% if r2_limit %}
+  <div class="r2-usage{% if r2_warn %} warn{% endif %}">
+    <div class="r2-usage-head">
+      <span>☁ R2 云存储用量</span>
+      <span>{{ '%.2f'|format(r2_used/1073741824) }} GB / {{ '%.0f'|format(r2_limit/1073741824) }} GB</span>
+    </div>
+    <div class="r2-bar"><div class="r2-bar-fill" style="width:{{ [r2_pct,100]|min }}%"></div></div>
+    {% if r2_warn %}<div class="r2-tip">⚠ 剩余不足 1 GB，再上传可能超出免费额度产生费用。</div>{% endif %}
+  </div>
+  {% endif %}
+
   <form method="post" action="{{ url_for('admin_course_edit', cid=co.id) }}"
         enctype="multipart/form-data"
         class="admin-form card-pad form-narrow">

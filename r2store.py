@@ -97,3 +97,58 @@ def pull_db_from_r2(force=True):
     if not force and os.path.isfile(config.DB_PATH):
         return False
     return download_file(DB_KEY, config.DB_PATH)
+
+
+# ---------------------------------------------------------------------------
+# 容量上限（仅当启用 R2 时生效）
+# ---------------------------------------------------------------------------
+# 默认 10 GB，与 Cloudflare R2 免费额度一致；可用环境变量 R2_STORAGE_LIMIT_GB
+# 覆盖（设为 0 或留空表示不限）。建议留默认值，超出即按 $0.015/GB/月 计费。
+_R2_LIMIT_GB = (os.environ.get("R2_STORAGE_LIMIT_GB") or "").strip()
+R2_STORAGE_LIMIT = (int(_R2_LIMIT_GB) * 1073741824) if _R2_LIMIT_GB not in ("", "0") else (10 * 1073741824)
+# 剩余不足该值时给出告警（"快用完了"）
+_R2_WARN_BYTES = 1073741824  # 1 GB
+
+
+def get_usage():
+    """返回桶当前已用总字节数；未启用 R2 时返回 0。"""
+    if not USE_R2:
+        return 0
+    total = 0
+    ct = None
+    while True:
+        resp = (_get_client().list_objects_v2(Bucket=R2_BUCKET, ContinuationToken=ct)
+                if ct else _get_client().list_objects_v2(Bucket=R2_BUCKET))
+        for o in resp.get("Contents", []):
+            total += o["Size"]
+        if not resp.get("IsTruncated"):
+            break
+        ct = resp.get("NextContinuationToken")
+    return total
+
+
+def check_capacity(extra_bytes):
+    """检查新增 extra_bytes 是否会超出容量上限。
+
+    返回 (ok, used_bytes, limit_bytes, message)：
+      - ok=False  → 已超限，message 为拒绝原因（应停止上传）；
+      - ok=True   → 可上传；若接近上限 message 为告警（可空）。
+    未启用 R2 时永远放行（本地文件系统无此限制）。
+    """
+    if not USE_R2:
+        return True, 0, R2_STORAGE_LIMIT, ""
+    used = get_usage()
+    limit = R2_STORAGE_LIMIT
+    new_used = used + extra_bytes
+    if new_used > limit:
+        return False, used, limit, (
+            "⚠ R2 免费存储额度已用尽（已用 %.2f GB / 上限 %.0f GB），"
+            "本次文件（%.1f MB）未上传。请先删除旧视频或提高额度后再试。"
+            % (used / 1073741824, limit / 1073741824, extra_bytes / 1048576)
+        )
+    if limit - new_used < _R2_WARN_BYTES:  # 剩余不足 1GB，给告警
+        return True, used, limit, (
+            "⚠ 注意：R2 剩余空间不足 1 GB（当前已用 %.2f / %.0f GB），"
+            "再上传可能超出免费额度产生费用。" % (new_used / 1073741824, limit / 1073741824)
+        )
+    return True, used, limit, ""

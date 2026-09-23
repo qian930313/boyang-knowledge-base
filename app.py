@@ -532,7 +532,11 @@ def admin_course_edit(cid):
             sql = "UPDATE courses SET %s WHERE id=?" % ", ".join("%s=?" % k for k in fields)
             db.execute(sql, list(fields.values()) + [cid])
         if request.form.get("_section") == "meta":
-            flash("已上传 %d 个文件" % uploaded if uploaded else "没有选择文件，未做任何改动")
+            if uploaded > 0:
+                flash("已上传 %d 个文件" % uploaded)
+            elif uploaded == 0:
+                flash("没有选择文件，未做任何改动")
+            # uploaded < 0：被容量拦截，_store_uploads 已 flash 拒绝消息
         else:
             flash("课程信息已保存")
         return redirect(url_for("admin_course_edit", cid=cid))
@@ -540,7 +544,8 @@ def admin_course_edit(cid):
 
 
 def _store_uploads(cid, files, sort, meta_map=None, batch_default=None):
-    """保存上传的视频/课件，返回成功入库的文件数。
+    """保存上传的视频/课件，返回成功入库的文件数；被容量拦截时返回 -1。
+
     同一批上传的文件共享一个 unit_id（学习单元），使「一次上传的视频+课件」自动成组。
     meta_map: {原始文件名: (课程名称, 主讲人, 录制时间)}，逐个文件写入 materials 的同名列，
     因此同一课程下每个视频都可以有自己的一套课程名称/主讲人/录制时间。
@@ -549,6 +554,22 @@ def _store_uploads(cid, files, sort, meta_map=None, batch_default=None):
     files = [f for f in files if f and f.filename]
     if not files:
         return 0
+    # --- R2 容量拦截：上传前先计算本批总大小，超限则整体拒绝并提示 ---
+    if r2store.USE_R2:
+        batch_total = 0
+        for f in files:
+            try:  # 探测文件大小（werkzeug FileStorage 支持 seek/tell）
+                f.seek(0, os.SEEK_END)
+                batch_total += f.tell()
+                f.seek(0)
+            except Exception:
+                pass
+        ok, used, limit, msg = r2store.check_capacity(batch_total)
+        if not ok:
+            flash(msg)
+            return -1  # 被容量拦截，调用方不应再提示「上传成功/未选文件」
+        if msg:
+            flash(msg)
     meta_map = meta_map or {}
     course_dir = os.path.join(config.UPLOAD_DIR, str(cid))
     os.makedirs(course_dir, exist_ok=True)
@@ -664,8 +685,14 @@ def _resolve_category(name, fallback_id):
 
 
 def _render_course_form(co, cat_name, mats=None, qz=None):
+    r2_used = r2store.get_usage()
+    r2_limit = r2store.R2_STORAGE_LIMIT
+    r2_pct = (r2_used / r2_limit * 100) if r2_limit else 0
+    r2_warn = bool(r2_limit) and (r2_limit - r2_used < r2store._R2_WARN_BYTES)
     return render_template("admin/course_form.html", co=co, cat_name=cat_name,
-                           mats=mats or [], qz=qz)
+                           mats=mats or [], qz=qz,
+                           r2_used=r2_used, r2_limit=r2_limit,
+                           r2_pct=r2_pct, r2_warn=r2_warn)
 
 
 def _render_course_edit(cid):
@@ -686,9 +713,13 @@ def admin_upload(cid):
     co = db.get_course(cid)
     if not co:
         abort(404)
-    _store_uploads(cid, request.files.getlist("file"),
-                   int(request.form.get("sort", 0) or 0))
-    flash("上传成功")
+    n = _store_uploads(cid, request.files.getlist("file"),
+                      int(request.form.get("sort", 0) or 0))
+    if n > 0:
+        flash("上传成功")
+    elif n == 0:
+        flash("没有选择文件，未做任何改动")
+    # n < 0：被容量拦截，_store_uploads 已 flash 拒绝消息
     return redirect(url_for("admin_course_edit", cid=cid))
 
 

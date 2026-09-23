@@ -478,3 +478,20 @@ img{max-width:100%}
   .course-list,.cert-list,.mat-list{grid-template-columns:1fr}
   .doc-frame{min-height:60vh}
 }
+
+/* R2 用量条 */
+.r2-usage{background:#fff;border:1px solid var(--line);border-radius:var(--radius);
+  padding:14px 16px;margin:0 0 18px;box-shadow:var(--shadow)}
+.r2-usage-head{display:flex;justify-content:space-between;align-items:center;
+  font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px}
+.r2-usage-head span:last-child{color:var(--sub);font-variant-numeric:tabular-nums}
+.r2-bar{height:10px;background:#EEF1F5;border-radius:6px;overflow:hidden}
+.r2-bar-fill{height:100%;background:linear-gradient(90deg,var(--ok),#4FD49B);transition:width .4s}
+.r2-usage.warn{border-color:var(--warn);background:#FFF8EC}
+.r2-usage.warn .r2-bar-fill{background:linear-gradient(90deg,var(--warn),#FBC15E)}
+.r2-tip{margin-top:8px;font-size:13px;color:#B36B00}
+
+/* 系统提示（flash）更醒目 */
+.flash{margin:0 0 18px;padding:12px 16px;border-radius:12px;font-size:14px;line-height:1.5;
+  background:var(--primary-l);border:1px solid #F6D6AE;color:#9A5A12}
+.flash div+div{margin-top:6px}
