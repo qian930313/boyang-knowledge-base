@@ -86,8 +86,14 @@ def sync_db_to_r2():
         put_file(DB_KEY, config.DB_PATH)
 
 
-def pull_db_from_r2():
-    """启动前从 R2 拉取最新数据库到本地（若本地不存在）。返回是否成功拉取。"""
-    if USE_R2 and not os.path.isfile(config.DB_PATH):
-        return download_file(DB_KEY, config.DB_PATH)
-    return False
+def pull_db_from_r2(force=True):
+    """启动前从 R2 拉取最新数据库到本地。返回是否成功拉取。
+
+    force=True（默认）：只要 R2 上存在数据库，就以 R2 为准覆盖本地——
+    避免容器重启/重新部署后，用镜像里的旧库覆盖云端最新数据。
+    """
+    if not USE_R2:
+        return False
+    if not force and os.path.isfile(config.DB_PATH):
+        return False
+    return download_file(DB_KEY, config.DB_PATH)
