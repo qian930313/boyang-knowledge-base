@@ -10,13 +10,15 @@
   var MAX_MB = window.KB_MAX_MB || 4096;
   var pending = 0;
 
-  function toast(msg) {
+  function toast(msg, kind) {
     var t = document.createElement('div');
-    t.className = 'panel-toast';
+    t.className = 'panel-toast' + (kind ? ' panel-toast-' + kind : '');
     t.textContent = msg;
     document.body.appendChild(t);
-    setTimeout(function () { t.classList.add('out'); }, 1800);
-    setTimeout(function () { t.parentNode && t.parentNode.removeChild(t); }, 2500);
+    // 错误提示停留更久（6s），成功提示 2.5s；避免一闪而过被忽略
+    var life = kind === 'error' ? 6000 : (kind === 'ok' ? 2600 : 2000);
+    setTimeout(function () { t.classList.add('out'); }, life - 500);
+    setTimeout(function () { t.parentNode && t.parentNode.removeChild(t); }, life);
   }
 
   function fmtSize(bytes) {
@@ -263,11 +265,12 @@
       if (aborted) return Promise.reject(new Error('aborted'));
       if (idx >= files.length) {
         return jsonPost('/admin/course/' + cid + '/commit-batch', { batch: batch, meta: meta, files: uploaded })
-          .then(function () { setOverall(1); cleanup(); })
-          .catch(function (e) { fail(e.message || '提交失败'); throw e; });
+          .then(function () { setOverall(1); cleanup(); toast('✓ 上传成功，正在刷新页面…', 'ok'); })
+          .catch(function (e) { fail('✕ 最后一步「登记数据库」失败：' + (e.message || '未知错误')); throw e; });
       }
       var file = files[idx];
       return jsonPost('/admin/course/' + cid + '/sign', { name: file.name, size: file.size, type: file.type })
+        .catch(function (e) { throw new Error('获取上传凭证失败：' + (e.message || '')); })
         .then(function (sig) {
           return putToR2(sig.url, file, sig.contentType, function (p) {
             setOverall((done + (p || 0)) / files.length);
@@ -275,7 +278,7 @@
             uploaded.push({ key: sig.key, name: file.name });
             done += 1;
             setOverall(done / files.length);
-          });
+          }).catch(function (e) { throw new Error('直传到云存储失败：' + (e.message || '')); });
         })
         .then(function () { return step(idx + 1); })
         .catch(function (e) { fail(e.message || '上传失败'); throw e; });
