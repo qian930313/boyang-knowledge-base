@@ -124,12 +124,14 @@ def make_presigned_put(key, content_type="", expires=900):
 
     返回可 PUT 上传的临时 URL（默认 15 分钟有效）。配合前端直接 fetch/PUT 把文件发到 R2，
     服务器全程不接收大文件本体，从而绕过 Render 免费实例的磁盘/内存限制。
+
+    注意：签名只绑定 Bucket/Key，不绑定 Content-Type —— 否则浏览器以 File 作请求体时，
+    只要实际 Content-Type 与签名值有丝毫差异（文件类型探测为空、多出 charset 等），
+    R2 就会返回 403 导致直传失败。Content-Type 通过普通请求头传递，由调用方在 PUT 时显式设置。
     """
     if not USE_R2:
         return None
     params = {"Bucket": R2_BUCKET, "Key": key}
-    if content_type:
-        params["ContentType"] = content_type
     try:
         return _get_client().generate_presigned_url(
             "put_object", Params=params, ExpiresIn=expires
