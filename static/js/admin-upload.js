@@ -168,7 +168,123 @@
     });
   }
 
+  /* -------------------------------------------------------------------------
+   * 浏览器直传 R2（仅当 KB_USE_R2=true 时启用）。
+   * 解决「Render 免费实例接收大文件时内存/临时盘撑爆导致上传失败」的问题：
+   * 服务器只签发上传凭证与登记数据库，文件本体由浏览器直接 PUT 到 R2。
+   * ---------------------------------------------------------------------- */
+  function val(form, name) {
+    var el = form.querySelector('[name="' + name + '"]');
+    return el ? el.value : '';
+  }
+
+  function jsonPost(url, obj) {
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', url, true);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.setRequestHeader('X-Requested-With', 'fetch');
+      xhr.onload = function () {
+        var data = null;
+        try { data = JSON.parse(xhr.responseText); } catch (e) { data = {}; }
+        if (xhr.status >= 200 && xhr.status < 400 && !data.error) resolve(data);
+        else reject(new Error(data.error || ('HTTP ' + xhr.status)));
+      };
+      xhr.onerror = function () { reject(new Error('网络错误')); };
+      xhr.send(JSON.stringify(obj || {}));
+    });
+  }
+
+  function putToR2(url, file, contentType, onProgress) {
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open('PUT', url, true);
+      if (contentType) xhr.setRequestHeader('Content-Type', contentType);
+      if (xhr.upload) {
+        xhr.upload.onprogress = function (e) {
+          if (e.lengthComputable) onProgress(e.loaded / e.total);
+        };
+      }
+      xhr.onload = function () {
+        if (xhr.status >= 200 && xhr.status < 400) resolve();
+        else reject(new Error('直传到云存储失败（HTTP ' + xhr.status + '）'));
+      };
+      xhr.onerror = function () { reject(new Error('网络错误，直传失败')); };
+      xhr.onabort = function () { reject(new Error('已中断')); };
+      xhr.send(file);
+    });
+  }
+
+  function kbUploadDirect(form) {
+    var cid = form.getAttribute('data-cid');
+    if (!cid) return Promise.reject(new Error('缺少课程 id'));
+    var files = [];
+    Array.prototype.forEach.call(form.querySelectorAll('input[type=file]'), function (inp) {
+      Array.prototype.forEach.call(inp.files || [], function (f) { files.push(f); });
+    });
+    if (!files.length) return Promise.reject(new Error('no_file'));
+    for (var i = 0; i < files.length; i++) {
+      if (files[i].size > MAX_MB * 1048576) {
+        toast('✕ ' + files[i].name + '（' + fmtSize(files[i].size) + '）超过 ' + MAX_MB + ' MB 上限');
+        return Promise.reject(new Error('too_large'));
+      }
+    }
+    var meta = {
+      course_title: val(form, 'course_title'),
+      lecturer: val(form, 'lecturer'),
+      record_time: val(form, 'record_time'),
+      sort: val(form, 'sort')
+    };
+    var batch = 'b' + Date.now() + Math.random().toString(36).slice(2);
+    var total = files.reduce(function (n, f) { return n + f.size; }, 0);
+    var wrap = document.createElement('div');
+    wrap.className = 'up-wrap';
+    wrap.innerHTML = '<div class="up-bar"><i></i></div><div class="up-tip"></div>';
+    wrap.querySelector('.up-tip').textContent =
+      '共 ' + files.length + ' 个文件 / ' + fmtSize(total) + '，正在直传到云存储，请勿刷新或关闭页面';
+    var btn = form.querySelector('button[type=submit], button:not([type])');
+    if (btn) { btn.disabled = true; btn.dataset.txt = btn.textContent; btn.textContent = '上传中 0%'; }
+    (btn ? btn.parentNode : form).insertBefore(wrap, btn ? btn.nextSibling : null);
+    var bar = wrap.querySelector('i');
+    guard(true);
+
+    var uploaded = [], done = 0, aborted = false;
+
+    function setOverall(p) { if (bar) bar.style.width = Math.round(p * 100) + '%'; if (btn) btn.textContent = '上传中 ' + Math.round(p * 100) + '%'; }
+
+    function cleanup() {
+      guard(false);
+      if (wrap && wrap.parentNode) wrap.parentNode.removeChild(wrap);
+      if (btn) { btn.disabled = false; btn.textContent = btn.dataset.txt || '保存'; }
+    }
+    function fail(msg) { cleanup(); toast('✕ ' + msg); }
+
+    function step(idx) {
+      if (aborted) return Promise.reject(new Error('aborted'));
+      if (idx >= files.length) {
+        return jsonPost('/admin/course/' + cid + '/commit-batch', { batch: batch, meta: meta, files: uploaded })
+          .then(function () { setOverall(1); cleanup(); })
+          .catch(function (e) { fail(e.message || '提交失败'); throw e; });
+      }
+      var file = files[idx];
+      return jsonPost('/admin/course/' + cid + '/sign', { name: file.name, size: file.size, type: file.type })
+        .then(function (sig) {
+          return putToR2(sig.url, file, sig.contentType, function (p) {
+            setOverall((done + (p || 0)) / files.length);
+          }).then(function () {
+            uploaded.push({ key: sig.key, name: file.name });
+            done += 1;
+            setOverall(done / files.length);
+          });
+        })
+        .then(function () { return step(idx + 1); })
+        .catch(function (e) { fail(e.message || '上传失败'); throw e; });
+    }
+    return step(0);
+  }
+
   window.kbToast = toast;
   window.kbSubmitForm = submit;
   window.kbBindRequired = bindRequired;
+  window.kbUploadDirect = kbUploadDirect;
 })();

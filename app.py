@@ -6,12 +6,13 @@ import os
 import re
 import io
 import json
+import time
 import mimetypes
 import shutil
 import subprocess
 from flask import (
     Flask, request, session, g, render_template, redirect,
-    url_for, send_from_directory, send_file, flash, abort, Response,
+    url_for, send_from_directory, send_file, flash, abort, Response, jsonify,
 )
 from werkzeug.utils import secure_filename
 import config
@@ -595,11 +596,21 @@ def _store_uploads(cid, files, sort, meta_map=None, batch_default=None):
             fname = "%s_%d%s" % (stem, i, ext)
             dest = os.path.join(course_dir, fname)
             i += 1
-        f.save(dest)
         rel = os.path.relpath(dest, config.UPLOAD_DIR).replace("\\", "/")
-        if r2store.USE_R2:
-            r2store.put_file(rel, dest)
         mtype = "video" if ext in config.ALLOWED_VIDEO_EXT else "doc"
+        # R2 模式下，大视频直接把上传流推到 R2，不落本地磁盘
+        # —— Render 免费实例临时磁盘只有几百 MB，f.save 会因写不下而失败。
+        # 文档仍需本地副本做 PDF 转换，故仍走 f.save 落地。
+        if r2store.USE_R2 and mtype == "video":
+            r2store.put_stream(rel, f.stream, r2store.guess_content_type(ext))
+            try:
+                f.stream.close()
+            except Exception:
+                pass
+        else:
+            f.save(dest)
+            if r2store.USE_R2:
+                r2store.put_file(rel, dest)
         # 文档尝试转 PDF 以便浏览器内预览
         preview = None
         if mtype == "doc":
@@ -692,7 +703,8 @@ def _render_course_form(co, cat_name, mats=None, qz=None):
     return render_template("admin/course_form.html", co=co, cat_name=cat_name,
                            mats=mats or [], qz=qz,
                            r2_used=r2_used, r2_limit=r2_limit,
-                           r2_pct=r2_pct, r2_warn=r2_warn)
+                           r2_pct=r2_pct, r2_warn=r2_warn,
+                           r2_enabled=r2store.USE_R2)
 
 
 def _render_course_edit(cid):
@@ -721,6 +733,126 @@ def admin_upload(cid):
         flash("没有选择文件，未做任何改动")
     # n < 0：被容量拦截，_store_uploads 已 flash 拒绝消息
     return redirect(url_for("admin_course_edit", cid=cid))
+
+
+# 浏览器直传 R2 时，本批上传的 batch token -> 统一 unit_id 的映射（进程内缓存，单实例够用）
+_BATCH_UNITS = {}
+
+
+@app.route("/admin/course/<int:cid>/sign", methods=["POST"])
+def admin_sign_upload(cid):
+    """为「浏览器直传 R2」签发一次性上传凭证（预签名 PUT URL）。
+
+    服务器不接收文件本体，仅做：扩展名校验 + 容量预判 + 生成唯一 key + 返回预签名 URL。
+    前端拿到 URL 后自行把文件 PUT 到 R2，再调用 commit-batch 登记数据库。"""
+    r = ensure_admin()
+    if r is not None:
+        return jsonify(error="未登录"), 401
+    if not r2store.USE_R2:
+        return jsonify(error="未启用云存储，无法直传"), 400
+    if not db.get_course(cid):
+        return jsonify(error="课程不存在"), 404
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    size = int(data.get("size") or 0)
+    if not name:
+        return jsonify(error="缺少文件名"), 400
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in config.ALLOWED_EXT:
+        return jsonify(error="不支持的文件类型：%s" % (ext or "无扩展名")), 400
+    if size <= 0:
+        return jsonify(error="文件大小为 0"), 400
+    ok, _used, _limit, msg = r2store.check_capacity(size)
+    if not ok:
+        return jsonify(error=msg), 413
+    # 生成唯一 key（避免重名覆盖）
+    stem = secure_filename(os.path.splitext(name)[0]).strip("._-") or "file"
+    fname = stem + ext
+    key = "uploads/%d/%s" % (cid, fname)
+    i = 1
+    while r2store.object_exists(key):
+        fname = "%s_%d%s" % (stem, i, ext)
+        key = "uploads/%d/%s" % (cid, fname)
+        i += 1
+    content_type = r2store.guess_content_type(ext)
+    url = r2store.make_presigned_put(key, content_type)
+    if not url:
+        return jsonify(error="生成上传凭证失败"), 500
+    return jsonify(key=key, url=url, contentType=content_type, method="PUT")
+
+
+@app.route("/admin/course/<int:cid>/commit-batch", methods=["POST"])
+def admin_commit_batch(cid):
+    """直传完成后，把一批已上传到 R2 的文件登记进数据库。
+
+    前端在全部文件 PUT 完成后调用本接口，一次性提交：
+      { batch, meta:{course_title,lecturer,record_time,sort}, files:[{key,name}, ...] }
+    同批文件共享一个 unit_id（保持与旧逻辑一致的「一次上传成组」行为）。"""
+    r = ensure_admin()
+    if r is not None:
+        return jsonify(error="未登录"), 401
+    if not db.get_course(cid):
+        return jsonify(error="课程不存在"), 404
+    data = request.get_json(silent=True) or {}
+    files = data.get("files") or []
+    if not files:
+        return jsonify(error="没有要提交的视频"), 400
+    for f in files:
+        key = f.get("key") or ""
+        if not key.startswith("uploads/%d/" % cid):
+            return jsonify(error="非法的文件 key"), 400
+        if not r2store.object_exists(key):
+            return jsonify(error="文件尚未上传完成：%s" % (f.get("name") or key)), 400
+    # 本批次统一 unit_id（同 token 复用，跨文件成组）
+    token = (data.get("batch") or "").strip() or ("b%d" % int(time.time() * 1000))
+    now = time.time()
+    unit_id = None
+    if token in _BATCH_UNITS and now - _BATCH_UNITS[token][1] < 3600:
+        unit_id = _BATCH_UNITS[token][0]
+    if unit_id is None:
+        row = db.fetch_one("SELECT COALESCE(MAX(unit_id),0) AS u FROM materials WHERE course_id=?",
+                           (cid,))
+        unit_id = (row["u"] if row else 0) + 1
+        _BATCH_UNITS[token] = (unit_id, now)
+    for k in [k for k, v in _BATCH_UNITS.items() if now - v[1] > 3600]:
+        del _BATCH_UNITS[k]
+
+    meta = data.get("meta") or {}
+    sort = int(meta.get("sort") or 0)
+    ct = (meta.get("course_title") or "").strip() or None
+    le = (meta.get("lecturer") or "").strip() or None
+    rt = (meta.get("record_time") or "").strip() or None
+    inserted = []
+    for f in files:
+        key = f["key"]
+        name = f.get("name") or key.split("/")[-1]
+        ext = os.path.splitext(name)[1].lower()
+        mtype = "video" if ext in config.ALLOWED_VIDEO_EXT else "doc"
+        title = os.path.splitext(name)[0].strip() or name
+        # 直传模式不做本地 PDF 转换（文档仍可下载，仅缺少浏览器内预览）
+        mid = db.execute(
+            "INSERT INTO materials(course_id,type,title,file_path,preview_path,sort,unit_id,"
+            "course_title,lecturer,record_time) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (cid, mtype, title, key, None, sort, unit_id, ct, le, rt),
+        )
+        inserted.append((mid, mtype))
+    # 同批次只有一个视频时，课件自动作为该视频附件（与原逻辑一致）
+    videos = [mid for mid, t in inserted if t == "video"]
+    if len(videos) == 1:
+        v = db.fetch_one("SELECT course_title,lecturer,record_time FROM materials WHERE id=?",
+                         (videos[0],))
+        for mid, t in inserted:
+            if t == "video":
+                continue
+            db.execute("UPDATE materials SET attach_id=? WHERE id=?", (videos[0], mid))
+            db.execute(
+                "UPDATE materials SET "
+                "course_title=COALESCE(NULLIF(course_title,''),?),"
+                "lecturer=COALESCE(NULLIF(lecturer,''),?),"
+                "record_time=COALESCE(NULLIF(record_time,''),?) WHERE id=?",
+                (v["course_title"], v["lecturer"], v["record_time"], mid),
+            )
+    return jsonify(ok=True, count=len(inserted))
 
 
 @app.route("/admin/course/<int:cid>/videos-meta", methods=["POST"])

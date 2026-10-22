@@ -8,6 +8,7 @@ Cloudflare R2 对象存储封装（S3 兼容）。
 - 公开桶可设 R2_PUBLIC_URL 用直链（更简单、支持 Range 播放）；私有桶自动用预签名 URL。
 """
 import os
+import localenv  # 确保本机运行时 .env 中的 R2 凭证已注入（在下方读取 os.environ 之前）
 import config
 
 R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID", "")
@@ -43,7 +44,110 @@ def put_file(key, local_path):
     """上传本地文件到 R2（key 含路径，如 uploads/3/abc.mp4）。"""
     if not USE_R2:
         return
-    _get_client().upload_file(local_path, R2_BUCKET, key)
+    from boto3.s3.transfer import TransferConfig
+    cfg = TransferConfig(
+        multipart_threshold=8 * 1024 * 1024,
+        multipart_chunksize=8 * 1024 * 1024,
+        max_concurrency=10,
+    )
+    _get_client().upload_file(local_path, R2_BUCKET, key, Config=cfg)
+
+
+_CONTENT_TYPES = {
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
+    ".m4v": "video/mp4",
+    ".ogg": "video/ogg",
+    ".pdf": "application/pdf",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+}
+
+
+def guess_content_type(ext):
+    """根据扩展名推断 Content-Type（R2 存储的视频需要正确的 video/* 类型才能正常播放）。"""
+    return _CONTENT_TYPES.get((ext or "").lower(), "application/octet-stream")
+
+
+def put_stream(key, stream, content_type="", chunk_size=8 * 1024 * 1024):
+    """把文件流直接流式上传到 R2，全程不落本地磁盘。
+
+    逐块读取（默认 8MB）并分片上传，内存/磁盘占用恒定，因此即使上传 600MB+
+    的大视频也不会撑爆 Render 免费实例的临时磁盘。适用于网页后台直传场景。
+    stream 需支持 read()；读取结束后由调用方负责关闭。
+    """
+    if not USE_R2:
+        return
+    client = _get_client()
+    ct = content_type or "application/octet-stream"
+    mpu = client.create_multipart_upload(Bucket=R2_BUCKET, Key=key, ContentType=ct)
+    upload_id = mpu["UploadId"]
+    parts = []
+    part_no = 1
+    try:
+        while True:
+            data = stream.read(chunk_size)
+            if not data:
+                break
+            if isinstance(data, str):
+                data = data.encode("utf-8")
+            resp = client.upload_part(
+                Bucket=R2_BUCKET, Key=key, UploadId=upload_id,
+                PartNumber=part_no, Body=data,
+            )
+            parts.append({"ETag": resp["ETag"], "PartNumber": part_no})
+            part_no += 1
+        if not parts:  # 空文件，直接普通上传
+            client.put_object(Bucket=R2_BUCKET, Key=key, Body=b"", ContentType=ct)
+            return
+        client.complete_multipart_upload(
+            Bucket=R2_BUCKET, Key=key, UploadId=upload_id,
+            MultipartUpload={"Parts": parts},
+        )
+    except Exception:
+        try:
+            client.abort_multipart_upload(Bucket=R2_BUCKET, Key=key, UploadId=upload_id)
+        except Exception:
+            pass
+        raise
+
+
+def make_presigned_put(key, content_type="", expires=900):
+    """生成用于「浏览器直传 R2」的预签名 PUT URL。
+
+    返回可 PUT 上传的临时 URL（默认 15 分钟有效）。配合前端直接 fetch/PUT 把文件发到 R2，
+    服务器全程不接收大文件本体，从而绕过 Render 免费实例的磁盘/内存限制。
+    """
+    if not USE_R2:
+        return None
+    params = {"Bucket": R2_BUCKET, "Key": key}
+    if content_type:
+        params["ContentType"] = content_type
+    try:
+        return _get_client().generate_presigned_url(
+            "put_object", Params=params, ExpiresIn=expires
+        )
+    except Exception as e:
+        print("[r2] 生成预签名 PUT 失败 %s: %s" % (key, e))
+        return None
+
+
+def object_exists(key):
+    """R2 中是否存在该对象。"""
+    if not USE_R2:
+        return False
+    try:
+        _get_client().head_object(Bucket=R2_BUCKET, Key=key)
+        return True
+    except Exception:
+        return False
 
 
 def get_url(key, expires=3600):
