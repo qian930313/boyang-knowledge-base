@@ -765,17 +765,21 @@ def admin_sign_upload(cid):
     ok, _used, _limit, msg = r2store.check_capacity(size)
     if not ok:
         return jsonify(error=msg), 413
-    # 生成唯一 key（避免重名覆盖）
+    # 生成唯一 key（避免重名覆盖）。key 不带 "uploads/" 前缀，
+    # 与 _store_uploads 旧路径保持一致（均为 "<cid>/<file>"），
+    # 这样 file_path 与 uploads() 路由 / get_url 的命名空间统一，避免前台出现 /uploads/uploads/... 双重前缀。
     stem = secure_filename(os.path.splitext(name)[0]).strip("._-") or "file"
     fname = stem + ext
-    key = "uploads/%d/%s" % (cid, fname)
+    key = "%d/%s" % (cid, fname)
     i = 1
     while r2store.object_exists(key):
         fname = "%s_%d%s" % (stem, i, ext)
         key = "uploads/%d/%s" % (cid, fname)
         i += 1
     content_type = r2store.guess_content_type(ext)
-    url = r2store.make_presigned_put(key, content_type)
+    # 预签名有效期提到 1 小时：培训视频常数百 MB~1GB+，慢速网络下上传可能超过默认 15 分钟，
+    # 否则 PUT 中途签名过期会失败（前端表现为「进度条走完但没提示/前台不显示」）。
+    url = r2store.make_presigned_put(key, content_type, expires=3600)
     if not url:
         return jsonify(error="生成上传凭证失败"), 500
     return jsonify(key=key, url=url, contentType=content_type, method="PUT")
@@ -799,7 +803,7 @@ def admin_commit_batch(cid):
         return jsonify(error="没有要提交的视频"), 400
     for f in files:
         key = f.get("key") or ""
-        if not key.startswith("uploads/%d/" % cid):
+        if not key.startswith("%d/" % cid):
             return jsonify(error="非法的文件 key"), 400
         if not r2store.object_exists(key):
             return jsonify(error="文件尚未上传完成：%s" % (f.get("name") or key)), 400
