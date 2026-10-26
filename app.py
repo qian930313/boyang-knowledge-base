@@ -743,9 +743,15 @@ def admin_upload(cid):
 # 浏览器分片直传 R2：本批上传的 batch token -> 统一 unit_id 的映射（进程内缓存，单实例够用）
 _BATCH_UNITS = {}
 
-# 分片大小：8MB。实测本网络环境对 R2 的大块单请求会中途断流（几百 MB 单 PUT 超时，
-# 表现为「进度条走完但对象从未落进 R2」），而 8MB 小块稳定；每片独立签名、失败重试。
+# 分片大小：默认 8MB；超过 1GB 的大文件用 16MB 以减少请求轮次。
+# 为什么必须分片：整文件单请求无论走哪条路都会失败
+#   · 浏览器直传 R2 —— 本网络对 r2.cloudflarestorage.com 的 sustained 大块上传只有
+#     约 0.75MB/s 且会中途挂死，3.55GB 需要 81 分钟，必超时；
+#   · 整文件 POST 给服务器 —— 请求体过大，服务器处理时被平台杀掉，返回 500。
+# 分片后每片只有 8~16MB，单请求几秒完成，失败也只重传这一片。
 MPU_PART_SIZE = 8 * 1024 * 1024
+MPU_PART_SIZE_LARGE = 16 * 1024 * 1024
+LARGE_FILE_THRESHOLD = 1024 * 1024 * 1024      # 1GB 以上算大文件
 
 
 def _unique_object_key(cid, name):
@@ -767,15 +773,18 @@ def _unique_object_key(cid, name):
 
 @app.route("/admin/course/<int:cid>/mpu-init", methods=["POST"])
 def admin_mpu_init(cid):
-    """创建一个文件的分片上传任务（浏览器直传 R2 第 1 步）。
+    """开始（或继续）一个文件的分片上传。
 
-    服务器只做：扩展名校验 + 容量预判 + 生成唯一 key + 创建 R2 分片任务。
-    返回 uploadId 与分片大小，前端据此逐片请求预签名 URL 并直传 R2。"""
+    支持断点续传：同一个文件再次上传时，若 R2 上还留着上次没做完的分片任务，
+    就直接复用它的 uploadId，并把「已传成功的分片」一并返回，前端只补缺失的片。
+    这对几百 MB~几 GB 的培训视频是必需的 —— 传了一小时断掉后不必从头再来。
+
+    返回：{ key, uploadId, partSize, title, done:[{ETag,PartNumber,Size}], resumed }"""
     r = ensure_admin()
     if r is not None:
         return jsonify(error="未登录"), 401
     if not r2store.USE_R2:
-        return jsonify(error="未启用云存储，无法直传"), 400
+        return jsonify(error="未启用云存储，无法上传"), 400
     if not db.get_course(cid):
         return jsonify(error="课程不存在"), 404
     data = request.get_json(silent=True) or {}
@@ -791,18 +800,40 @@ def admin_mpu_init(cid):
     ok, _used, _limit, msg = r2store.check_capacity(size)
     if not ok:
         return jsonify(error=msg), 413
+
+    part_size = MPU_PART_SIZE_LARGE if size > LARGE_FILE_THRESHOLD else MPU_PART_SIZE
     key = _unique_object_key(cid, name)
     content_type = r2store.guess_content_type(ext)
+
+    # 续传：优先复用该 key 上遗留的分片任务
+    resumed, upload_id, done = False, None, []
     try:
-        upload_id = r2store.create_mpu(key, content_type)
+        pending = r2store.find_mpu_by_key(key)
+        if pending:
+            done = r2store.list_parts(key, pending)
+            # 分片大小必须与本次一致，否则已传的片无法参与合并
+            if done and done[0]["Size"] == part_size:
+                upload_id, resumed = pending, True
+            else:
+                r2store.abort_mpu(key, pending)
     except Exception as e:
-        print("[r2] 创建分片上传失败 %s: %s" % (key, e))
-        return jsonify(error="创建上传任务失败，请重试"), 500
+        print("[r2] 检查续传状态失败 %s: %s" % (key, e))
+
+    if not upload_id:
+        try:
+            upload_id = r2store.create_mpu(key, content_type)
+        except Exception as e:
+            print("[r2] 创建分片上传失败 %s: %s" % (key, e))
+            return jsonify(error="创建上传任务失败，请重试"), 500
     # 单独回传「显示用标题」：存储 key 里的中文会被 secure_filename 过滤成 file，
     # 若拿 key 反推标题，用户上传的中文视频名在后台就全变成 "file"，无从分辨。
     title = os.path.splitext(name)[0].strip() or name
+    if resumed:
+        got = sum(p["Size"] for p in done)
+        print("[upload] 续传 %s：已传 %d/%d 片（%.1f%%）"
+              % (key, len(done), -(-size // part_size), got * 100.0 / max(size, 1)))
     return jsonify(key=key, uploadId=upload_id, contentType=content_type,
-                   partSize=MPU_PART_SIZE, title=title, method="PUT")
+                   partSize=part_size, title=title, done=done, resumed=resumed)
 
 
 @app.route("/admin/course/<int:cid>/mpu-sign-part", methods=["POST"])
@@ -828,6 +859,42 @@ def admin_mpu_sign_part(cid):
     return jsonify(url=url, method="PUT")
 
 
+@app.route("/admin/course/<int:cid>/mpu-part", methods=["POST"])
+def admin_mpu_part(cid):
+    """接收一片数据并由服务器转发到 R2（「经服务器中转」方案的第 2 步）。
+
+    浏览器把 16MB 小片 POST 到这里，服务器立刻 upload_part 到 R2。
+    为什么不从浏览器直传 R2：实测本机到 r2.cloudflarestorage.com 只有约 0.75MB/s
+    且长连接会挂死；而到本服务器有 3.65MB/s，服务器到 R2 是机房链路，快且稳定。
+    3.55GB 的视频：直传约 81 分钟，走这条路约 17 分钟。"""
+    r = ensure_admin()
+    if r is not None:
+        return jsonify(error="未登录"), 401
+    if not r2store.USE_R2:
+        return jsonify(error="未启用云存储，无法上传"), 400
+
+    key = request.args.get("key") or ""
+    upload_id = request.args.get("uploadId") or ""
+    try:
+        part_number = int(request.args.get("partNumber") or 0)
+    except (TypeError, ValueError):
+        part_number = 0
+    if not key.startswith("%d/" % cid) or not upload_id or not 1 <= part_number <= 10000:
+        return jsonify(error="参数不合法"), 400
+
+    body = request.get_data(cache=False)
+    if not body:
+        return jsonify(error="分片内容为空"), 400
+    if len(body) > MPU_PART_SIZE_LARGE:
+        return jsonify(error="分片过大"), 413
+    try:
+        etag = r2store.upload_part_bytes(key, upload_id, part_number, body)
+    except Exception as e:
+        print("[r2] 分片 %s#%d 转发失败: %s" % (key, part_number, e))
+        return jsonify(error="分片写入云存储失败，将重试"), 502
+    return jsonify(etag=etag, partNumber=part_number, size=len(body))
+
+
 @app.route("/admin/course/<int:cid>/mpu-complete", methods=["POST"])
 def admin_mpu_complete(cid):
     """合并分片并把该文件登记进数据库（第 3 步，每个文件传完后调用一次）。
@@ -846,15 +913,33 @@ def admin_mpu_complete(cid):
     parts = data.get("parts") or []
     if not key.startswith("%d/" % cid) or not upload_id:
         return jsonify(error="参数不合法"), 400
-    clean_parts = []
-    for p in parts:
-        try:
-            clean_parts.append({"ETag": str(p["ETag"]), "PartNumber": int(p["PartNumber"])})
-        except (KeyError, TypeError, ValueError):
-            return jsonify(error="分片信息不完整"), 400
+    # 以 R2 上的真实状态为准来合并，不信前端的记录：
+    # 几百片的大文件里，前端偶尔漏记/记错一个 ETag 就会导致合并失败、整轮白传。
+    try:
+        clean_parts = [{"ETag": p["ETag"], "PartNumber": p["PartNumber"]}
+                       for p in r2store.list_parts(key, upload_id)]
+    except Exception as e:
+        print("[r2] 读取已传分片失败 %s: %s" % (key, e))
+        clean_parts = []
     if not clean_parts:
-        return jsonify(error="没有已上传的分片"), 400
+        # 兜底：list_parts 查不到时再退回前端提交的信息
+        for p in parts:
+            try:
+                clean_parts.append({"ETag": str(p["ETag"]), "PartNumber": int(p["PartNumber"])})
+            except (KeyError, TypeError, ValueError):
+                return jsonify(error="分片信息不完整"), 400
+    if not clean_parts:
+        return jsonify(error="没有已上传的分片，请重新上传"), 400
     clean_parts.sort(key=lambda p: p["PartNumber"])
+    # 缺任何一片都会让合并出来的文件损坏，所以必须验全。
+    # 用前端告知的总片数来比对（list_parts 只能看到「已传的」，看不出还差几片）。
+    try:
+        total_parts = int(data.get("totalParts") or 0)
+    except (TypeError, ValueError):
+        total_parts = 0
+    if total_parts and len(clean_parts) < total_parts:
+        return jsonify(error="还差 %d 片没传完，请再点一次「保存」继续补传（已传的不会重来）"
+                             % (total_parts - len(clean_parts))), 400
     try:
         r2store.complete_mpu(key, upload_id, clean_parts)
     except Exception as e:

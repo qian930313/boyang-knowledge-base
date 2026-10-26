@@ -175,14 +175,19 @@
   }
 
   /* -------------------------------------------------------------------------
-   * 浏览器「分片直传 R2」。
-   * 历史教训（两次失败的方案，勿回退）：
-   *   1) 整文件单 PUT 直传 —— 本网络对 r2.cloudflarestorage.com 的大块单请求会
-   *      中途断流：进度条走完但对象从未落进 R2，且常常连错误提示都没有。
-   *   2) 服务器中转整文件 —— Render 上 gunicorn worker 读大请求体超过 30s
-   *      即被主进程杀掉（SIGKILL），必现 500。
-   *   现方案：文件切成 8MB 小片，每片独立向服务器要预签名 URL 后直传 R2，
-   *   单片失败自动重签重试 3 次；服务器只签名与合并，不经手文件本体。
+   * 「分片 + 经服务器中转 + 断点续传」。
+   *
+   * 历史教训（三种失败过的方案，勿回退）：
+   *   1) 整文件单 PUT 直传 R2 —— 本网络到 r2.cloudflarestorage.com 的持续上传
+   *      只有约 0.75MB/s 且长连接会挂死。256MB 实测 17 分钟以上且界面全程静默；
+   *      3.55GB 的文件要 81 分钟，必然超时失败。
+   *   2) 整文件 POST 给服务器 —— 请求体过大，服务器处理时被平台杀掉，返回 500。
+   *   3) 分片直传 R2（每片单独签名后由浏览器 PUT）—— 瓶颈仍是家庭宽带到 R2 这条
+   *      慢链路，大文件依然要一两个小时，只是把「无声失败」变成了「可见的慢」。
+   *
+   * 现方案：文件切成 8~16MB 小片，每片 POST 给服务器，由服务器转发到 R2。
+   *   浏览器→服务器实测 3.65MB/s，服务器→R2 是机房链路，3.55GB 约 17 分钟。
+   *   单片失败自动重试；整轮中断后已传分片保留在 R2，再点保存即从断点续传。
    * ---------------------------------------------------------------------- */
   function val(form, name) {
     var el = form.querySelector('[name="' + name + '"]');
@@ -196,18 +201,22 @@
    * 进度条停在某个百分比、之后再无任何提示，用户只能以为「传完了但没结果」。
    * 设了 timeout 后，挂死的连接会被 ontimeout 捕获，从而进入重试或报错流程。
    */
-  var XHR_TIMEOUT_MS = 180000;   // 3 分钟：8MB 单片在极差网络下也够用
-  var MAX_ATTEMPTS = 4;          // 单片最多尝试 4 次（首次 + 3 次退避重试）
+  // 超时必须留足余量：Render 免费实例空闲 15 分钟后会休眠，唤醒要几十秒，
+  // 卡着边界设 60 秒会让「第一次点保存」必然超时。
+  var XHR_TIMEOUT_MS = 90000;        // 普通接口（含冷启动）：90 秒
+  var PART_TIMEOUT_MS = 120000;      // 单片上传：16MB 正常 5 秒内完成，留足网络抖动余量
+  var COMPLETE_TIMEOUT_MS = 300000;  // 合并登记：几百分片时 R2 合并较慢，给 5 分钟
+  var MAX_ATTEMPTS = 5;              // 单片最多尝试 5 次（首次 + 4 次退避重试）
 
   function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
-  function jsonPost(url, obj) {
+  function jsonPost(url, obj, timeoutMs) {
     return new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
       xhr.open('POST', url, true);
       xhr.setRequestHeader('Content-Type', 'application/json');
       xhr.setRequestHeader('X-Requested-With', 'fetch');
-      xhr.timeout = 60000;
+      xhr.timeout = timeoutMs || XHR_TIMEOUT_MS;
       xhr.onload = function () {
         var data = null;
         try { data = JSON.parse(xhr.responseText); } catch (e) { data = {}; }
@@ -220,20 +229,23 @@
     });
   }
 
-  function putOnce(url, blob, contentType, onProgress) {
+  /* 把一片数据 POST 给服务器，由服务器转发到 R2（见 mpu-part 端点说明）。 */
+  function postPart(url, blob, onProgress) {
     return new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
-      xhr.open('PUT', url, true);
-      xhr.timeout = XHR_TIMEOUT_MS;
-      if (contentType) xhr.setRequestHeader('Content-Type', contentType);
+      xhr.open('POST', url, true);
+      xhr.timeout = PART_TIMEOUT_MS;
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
       if (xhr.upload) {
         xhr.upload.onprogress = function (e) {
-          if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total);
+          if (e.lengthComputable && onProgress) onProgress(e.loaded);
         };
       }
       xhr.onload = function () {
-        if (xhr.status >= 200 && xhr.status < 400) resolve(xhr.getResponseHeader('ETag') || '');
-        else reject(new Error('HTTP ' + xhr.status));
+        var d = null;
+        try { d = JSON.parse(xhr.responseText); } catch (e) { d = {}; }
+        if (xhr.status >= 200 && xhr.status < 400 && d && d.etag) resolve(d);
+        else reject(new Error(d && d.error ? d.error : ('HTTP ' + xhr.status)));
       };
       xhr.onerror = function () { reject(new Error('网络错误')); };
       xhr.ontimeout = function () { reject(new Error('连接超时')); };
@@ -242,7 +254,8 @@
     });
   }
 
-  /* 上传单个文件（分片直传 + 逐片重试）。返回 Promise，resolve 在数据库登记完成后。 */
+  /* 上传单个文件（分片经服务器中转 + 逐片重试 + 断点续传）。
+     返回 Promise，resolve 在数据库登记完成后。 */
   function uploadOne(cid, batch, meta, file, onProgress) {
     var sig = null;
     return jsonPost('/admin/course/' + cid + '/mpu-init', { name: file.name, size: file.size })
@@ -250,44 +263,55 @@
       .then(function () {
         var partSize = sig.partSize || 8 * 1024 * 1024;
         var total = Math.max(1, Math.ceil(file.size / partSize));
+        // 续传：把上次已经传到云端的分片直接算进来，不再重发
         var parts = [];
-        var sentBefore = 0;   // 已完成分片的累计字节数
-        var curPart = 0;      // 当前正在传第几片（用于界面上给出「还在动」的明确信号）
+        var sentBefore = 0;
+        var skip = {};
+        (sig.done || []).forEach(function (p) {
+          parts.push({ ETag: p.ETag, PartNumber: p.PartNumber });
+          sentBefore += p.Size;
+          skip[p.PartNumber] = true;
+        });
+        var resumedFrom = parts.length;
+        if (resumedFrom) {
+          toast('发现上次未传完的进度，已从第 ' + (resumedFrom + 1) + '/' + total +
+                ' 片继续（' + fmtSize(sentBefore) + ' 不用重传）', 'warn');
+        }
+        var curPart = resumedFrom;
         function report(partLoaded) {
           if (onProgress) onProgress(Math.min(sentBefore + partLoaded, file.size), file.size,
                                      curPart, total);
         }
+        report(0);
         var pno = 0;
         function nextPart() {
           if (pno >= total) return Promise.resolve(parts);
           var n = ++pno;
+          if (skip[n]) { return nextPart(); }        // 上次已传过，跳过
           curPart = n;
           var start = (n - 1) * partSize;
           var blob = file.slice(start, Math.min(start + partSize, file.size));
           var attempts = 0;
           function tryPut() {
             attempts += 1;
-            // 每次尝试都重新签名单片 URL（旧 URL 可能已过期或已被 R2 拒绝）
-            return jsonPost('/admin/course/' + cid + '/mpu-sign-part',
-                            { key: sig.key, uploadId: sig.uploadId, partNumber: n })
-              .then(function (u) {
-                return putOnce(u.url, blob, sig.contentType, function (loaded) { report(loaded); })
-                  .then(function (etag) {
-                    if (!etag) throw new Error('分片响应缺少 ETag');
-                    sentBefore += blob.size;
-                    report(0);
-                    parts.push({ ETag: etag.replace(/"/g, ''), PartNumber: n });
-                  });
+            var url = '/admin/course/' + cid + '/mpu-part?partNumber=' + n +
+                      '&uploadId=' + encodeURIComponent(sig.uploadId) +
+                      '&key=' + encodeURIComponent(sig.key);
+            return postPart(url, blob, function (loaded) { report(loaded); })
+              .then(function (d) {
+                sentBefore += blob.size;
+                report(0);
+                parts.push({ ETag: String(d.etag).replace(/"/g, ''), PartNumber: n });
               })
               .catch(function (e) {
                 if (attempts < MAX_ATTEMPTS) {
-                  toast('第 ' + n + '/' + total + ' 片上传失败（' + (e.message || '') +
-                        '），正在重试 ' + attempts + '/' + (MAX_ATTEMPTS - 1) + '…', 'warn');
+                  toast('第 ' + n + '/' + total + ' 片失败（' + (e.message || '') +
+                        '），重试 ' + attempts + '/' + (MAX_ATTEMPTS - 1) + '…', 'warn');
                   // 退避重试：网络抖动往往持续数秒，立刻重发大概率再失败
                   return wait(attempts * 2000).then(tryPut);
                 }
                 throw new Error('分片 ' + n + '/' + total + ' 连续 ' + attempts +
-                                ' 次上传失败：' + (e.message || ''));
+                                ' 次失败：' + (e.message || ''));
               });
           }
           return tryPut().then(nextPart);
@@ -295,22 +319,23 @@
         return nextPart();
       })
       .then(function (parts) {
-        // 全部分片传完：合并 + 登记数据库
+        // 全部分片传完：合并 + 登记数据库。合并可能要处理几百片，单独放宽超时。
         return jsonPost('/admin/course/' + cid + '/mpu-complete', {
           key: sig.key, uploadId: sig.uploadId, parts: parts,
+          totalParts: Math.max(1, Math.ceil(file.size / (sig.partSize || 8 * 1024 * 1024))),
           batch: batch, meta: meta,
           title: sig.title || file.name.replace(/\.[^.]+$/, '')
-        }).catch(function (e) {
+        }, COMPLETE_TIMEOUT_MS).catch(function (e) {
           throw new Error('「' + file.name + '」最后一步处理失败：' + (e.message || ''));
         });
       })
       .catch(function (e) {
-        // 统一清理：任何一步失败（分片连续重试仍失败、合并失败、登记失败）都要
-        // 放弃该文件的分片任务。否则已传出去的分片会作为孤儿留在 R2 里占着存储额度，
-        // 用户会看到「已用容量」上涨、桶里却找不到文件，自己也无从清理。
-        if (sig && sig.key && sig.uploadId) {
-          jsonPost('/admin/course/' + cid + '/mpu-abort',
-                   { key: sig.key, uploadId: sig.uploadId }).catch(function () {});
+        // 注意：这里**不**再 abort 分片任务。
+        // 以前失败就放弃任务，几 GB 的文件传到 90% 断掉后，再点保存要从头传一遍，
+        // 于是永远传不完。现在保留任务，下次点保存会自动接着上次的进度续传。
+        // 遗留分片只由后台的 abort_stale_mpu（超过 24 小时）统一清理。
+        if (sig && sig.uploadId) {
+          e.resumeHint = '已传的分片已保留，再点一次「保存」会从断点继续';
         }
         throw e;
       });
@@ -342,7 +367,7 @@
     wrap.className = 'up-wrap';
     wrap.innerHTML = '<div class="up-bar"><i></i></div><div class="up-tip"></div>';
     wrap.querySelector('.up-tip').textContent =
-      '共 ' + files.length + ' 个文件 / ' + fmtSize(total) + '，分片直传到云存储，请勿刷新或关闭页面';
+      '共 ' + files.length + ' 个文件 / ' + fmtSize(total) + '，分片上传中，请勿关闭页面';
     var btn = form.querySelector('button[type=submit], button:not([type])');
     if (btn) { btn.disabled = true; btn.dataset.txt = btn.textContent; btn.textContent = '上传中 0%'; }
     (btn ? btn.parentNode : form).insertBefore(wrap, btn ? btn.nextSibling : null);
@@ -370,7 +395,10 @@
       if (wrap && wrap.parentNode) wrap.parentNode.removeChild(wrap);
       if (btn) { btn.disabled = false; btn.textContent = btn.dataset.txt || '保存'; }
     }
-    function fail(msg) { cleanup(); toast('✕ ' + msg, 'error'); }
+    function fail(msg, hint) {
+      cleanup();
+      toast('✕ ' + msg + (hint ? '\n' + hint : ''), 'error');
+    }
 
     function step(idx) {
       if (idx >= files.length) {
@@ -385,7 +413,7 @@
         sentTotal += f.size;
         setOverall(sentTotal, idx + 1);
         return step(idx + 1);
-      }).catch(function (e) { fail(e.message || '上传失败'); throw e; });
+      }).catch(function (e) { fail(e.message || '上传失败', e.resumeHint); throw e; });
     }
     return step(0);
   }

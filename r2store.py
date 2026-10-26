@@ -171,6 +171,65 @@ def presign_part(key, upload_id, part_number, expires=3600):
         return None
 
 
+def upload_part_bytes(key, upload_id, part_number, data):
+    """由服务器把一片数据写进分片任务，返回该片 ETag。
+
+    这是「经服务器中转」方案的核心：浏览器把 16MB 小片 POST 给服务器，
+    服务器在这里直接调 R2 的 upload_part。服务器到 R2 是机房之间的链路，
+    远比家庭宽带到 R2 稳定且快（实测 3.65MB/s vs 0.75MB/s）。"""
+    if not USE_R2:
+        return None
+    resp = _get_client().upload_part(
+        Bucket=R2_BUCKET, Key=key, UploadId=upload_id,
+        PartNumber=part_number, Body=data,
+    )
+    return resp["ETag"].strip('"')
+
+
+def list_parts(key, upload_id):
+    """列出该分片任务里已成功上传的分片，返回 [{"ETag","PartNumber","Size"}]。
+
+    断点续传的依据：以 R2 上的真实状态为准，前端/localStorage 说的都不算数。"""
+    if not USE_R2:
+        return []
+    out, marker = [], 0
+    while True:
+        resp = _get_client().list_parts(
+            Bucket=R2_BUCKET, Key=key, UploadId=upload_id, PartNumberMarker=marker,
+        )
+        for p in resp.get("Parts", []):
+            out.append({"ETag": p["ETag"].strip('"'),
+                        "PartNumber": int(p["PartNumber"]),
+                        "Size": int(p["Size"])})
+        if not resp.get("IsTruncated"):
+            break
+        marker = int(resp.get("NextPartNumberMarker") or 0)
+    return out
+
+
+def find_mpu_by_key(key):
+    """找出该 key 上「进行中」的分片任务 upload_id（没有则 None）。
+
+    用于断点续传：同一个文件再次上传时，先看 R2 里有没有没做完的任务，
+    有就接着传，只补缺失的分片。
+
+    同一个 key 允许存在多个并发任务（多次失败重传会留下多个），
+    这里挑「已传分片最多」的那个，保证用户续回的是最接近完成的进度。"""
+    if not USE_R2:
+        return None
+    best, best_parts = None, -1
+    for m in list_mpus():
+        if m["key"] != key:
+            continue
+        try:
+            n = len(list_parts(key, m["upload_id"]))
+        except Exception:
+            n = 0
+        if n > best_parts:
+            best, best_parts = m["upload_id"], n
+    return best
+
+
 def complete_mpu(key, upload_id, parts):
     """合并已上传的分片。parts: [{"ETag": ..., "PartNumber": n}, ...]（按 PartNumber 升序）。"""
     if not USE_R2:
