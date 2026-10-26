@@ -84,13 +84,8 @@
       Array.prototype.forEach.call(inp.files || [], function (f) { files.push(f); });
     });
 
-    // 本地先校验体积：超限立刻提示，不必等整包传完再被服务器拒掉
-    for (var i = 0; i < files.length; i++) {
-      if (files[i].size > MAX_MB * 1048576) {
-        toast('✕ ' + files[i].name + '（' + fmtSize(files[i].size) + '）超过 ' + MAX_MB + ' MB 上限');
-        return Promise.reject(new Error('too_large'));
-      }
-    }
+    // 不再限制体积：视频在本机、切成分片上传，多大都能传（实际上限取决于 R2 剩余空间）。
+    // 这里只在容量明显不够时给一次提示，不阻断。
 
     var total = files.reduce(function (n, f) { return n + f.size; }, 0);
     var wrap = null, bar = null;
@@ -153,7 +148,7 @@
       xhr.onload = function () {
         cleanup();
         if (xhr.status >= 200 && xhr.status < 400) { resolve(xhr.responseText); return; }
-        var msg = xhr.status === 413 ? '✕ 文件太大，超出 ' + MAX_MB + ' MB 上限'
+        var msg = xhr.status === 413 ? '✕ 云存储空间不足（R2 免费额度已用满），请先删除旧视频再上传'
                 : xhr.status === 400 ? '✕ 上传被中断（页面被刷新或连接断开），请重试'
                 : (xhr.status === 401 || xhr.status === 403) ? '✕ 登录状态已失效，请重新登录后台'
                 : '✕ 保存失败（HTTP ' + xhr.status + '），请重试';
@@ -207,6 +202,9 @@
   var PART_TIMEOUT_MS = 120000;      // 单片上传：16MB 正常 5 秒内完成，留足网络抖动余量
   var COMPLETE_TIMEOUT_MS = 300000;  // 合并登记：几百分片时 R2 合并较慢，给 5 分钟
   var MAX_ATTEMPTS = 5;              // 单片最多尝试 5 次（首次 + 4 次退避重试）
+  var CONCURRENCY = 3;               // 并发片数：实测单连接约 2.7MB/s，是「每连接限速」；
+                                     // 3 路并行可把 3.5GB 从 ~25 分钟压到 ~10 分钟。
+                                     // 若目标服务器只有单个 worker，可下调为 1～2。
 
   function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
@@ -278,16 +276,22 @@
                 ' 片继续（' + fmtSize(sentBefore) + ' 不用重传）', 'warn');
         }
         var curPart = resumedFrom;
-        function report(partLoaded) {
-          if (onProgress) onProgress(Math.min(sentBefore + partLoaded, file.size), file.size,
-                                     curPart, total);
-        }
-        report(0);
+        // 并发上传：实测单条连接只有约 2.7MB/s，瓶颈在「每连接限速」而非总带宽，
+        // 所以多路并行能实打实提速。串行传 3.5GB 要 25 分钟，3 路并发约 10 分钟。
         var pno = 0;
-        function nextPart() {
-          if (pno >= total) return Promise.resolve(parts);
-          var n = ++pno;
-          if (skip[n]) { return nextPart(); }        // 上次已传过，跳过
+        var inflight = {};      // 各并发分片已传字节，用于汇总真实总进度
+        var firstError = null;
+
+        function report() {
+          var sum = sentBefore;
+          for (var k in inflight) {
+            if (Object.prototype.hasOwnProperty.call(inflight, k)) sum += inflight[k];
+          }
+          if (onProgress) onProgress(Math.min(sum, file.size), file.size, curPart, total);
+        }
+        report();
+
+        function putOne(n) {
           curPart = n;
           var start = (n - 1) * partSize;
           var blob = file.slice(start, Math.min(start + partSize, file.size));
@@ -297,26 +301,51 @@
             var url = '/admin/course/' + cid + '/mpu-part?partNumber=' + n +
                       '&uploadId=' + encodeURIComponent(sig.uploadId) +
                       '&key=' + encodeURIComponent(sig.key);
-            return postPart(url, blob, function (loaded) { report(loaded); })
-              .then(function (d) {
-                sentBefore += blob.size;
-                report(0);
-                parts.push({ ETag: String(d.etag).replace(/"/g, ''), PartNumber: n });
-              })
-              .catch(function (e) {
-                if (attempts < MAX_ATTEMPTS) {
-                  toast('第 ' + n + '/' + total + ' 片失败（' + (e.message || '') +
-                        '），重试 ' + attempts + '/' + (MAX_ATTEMPTS - 1) + '…', 'warn');
-                  // 退避重试：网络抖动往往持续数秒，立刻重发大概率再失败
-                  return wait(attempts * 2000).then(tryPut);
-                }
-                throw new Error('分片 ' + n + '/' + total + ' 连续 ' + attempts +
-                                ' 次失败：' + (e.message || ''));
-              });
+            inflight[n] = 0;
+            return postPart(url, blob, function (loaded) {
+              inflight[n] = loaded;
+              report();
+            }).then(function (d) {
+              sentBefore += blob.size;
+              delete inflight[n];
+              parts.push({ ETag: String(d.etag).replace(/"/g, ''), PartNumber: n });
+              report();
+            }).catch(function (e) {
+              delete inflight[n];
+              if (attempts < MAX_ATTEMPTS) {
+                toast('第 ' + n + '/' + total + ' 片失败（' + (e.message || '') +
+                      '），重试 ' + attempts + '/' + (MAX_ATTEMPTS - 1) + '…', 'warn');
+                // 退避重试：网络抖动往往持续数秒，立刻重发大概率再失败
+                return wait(attempts * 2000).then(tryPut);
+              }
+              var err = new Error('分片 ' + n + '/' + total + ' 连续 ' + attempts +
+                                  ' 次失败：' + (e.message || ''));
+              if (!firstError) firstError = err;   // 保留第一个错误，其余并发片照常传完
+              throw err;
+            });
           }
-          return tryPut().then(nextPart);
+          return tryPut();
         }
-        return nextPart();
+
+        var workers = [];
+        for (var w = 0; w < CONCURRENCY; w++) {
+          workers.push((function () {
+            function take() {
+              while (pno < total) {
+                var n = ++pno;
+                if (skip[n]) continue;              // 上次已传过，跳过
+                return putOne(n).then(take);
+              }
+              return Promise.resolve();
+            }
+            return take();
+          })());
+        }
+        return Promise.all(workers).then(function () {
+          if (firstError) throw firstError;
+          parts.sort(function (a, b) { return a.PartNumber - b.PartNumber; });
+          return parts;
+        });
       })
       .then(function (parts) {
         // 全部分片传完：合并 + 登记数据库。合并可能要处理几百片，单独放宽超时。
@@ -349,12 +378,7 @@
       Array.prototype.forEach.call(inp.files || [], function (f) { files.push(f); });
     });
     if (!files.length) return Promise.reject(new Error('no_file'));
-    for (var i = 0; i < files.length; i++) {
-      if (files[i].size > MAX_MB * 1048576) {
-        toast('✕ ' + files[i].name + '（' + fmtSize(files[i].size) + '）超过 ' + MAX_MB + ' MB 上限');
-        return Promise.reject(new Error('too_large'));
-      }
-    }
+    // 体积不设上限（分片上传，本机文件多大都能传完）
     var meta = {
       course_title: val(form, 'course_title'),
       lecturer: val(form, 'lecturer'),
