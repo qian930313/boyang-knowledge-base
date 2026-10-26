@@ -55,5 +55,7 @@ R2_PUBLIC_URL = (os.environ.get("R2_PUBLIC_URL", "") or "").rstrip("/")
 ALLOWED_VIDEO_EXT = {".mp4", ".webm", ".mov", ".m4v", ".ogg"}
 ALLOWED_DOC_EXT = {".pdf", ".ppt", ".pptx", ".doc", ".docx", ".xls", ".xlsx", ".key", ".txt", ".md"}
 ALLOWED_EXT = ALLOWED_VIDEO_EXT | ALLOWED_DOC_EXT
-# 单次上传体积上限（MB）。培训视频常有 1G 以上，默认给足；可用环境变量覆盖。
-MAX_UPLOAD_MB = int(os.environ.get("KB_MAX_UPLOAD_MB", "4096"))
+# 单次上传体积上限（MB）。默认 200 GB，等于不限制：
+# 视频切成 16MB 分片逐片上传，单请求体始终很小，不受这个值约束。
+# 真正决定能传多大的，是 R2 免费层的 10 GB 容量（可用 R2_STORAGE_LIMIT_GB 调整）。
+MAX_UPLOAD_MB = int(os.environ.get("KB_MAX_UPLOAD_MB", "204800"))
