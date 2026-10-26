@@ -202,9 +202,11 @@
   var PART_TIMEOUT_MS = 120000;      // 单片上传：16MB 正常 5 秒内完成，留足网络抖动余量
   var COMPLETE_TIMEOUT_MS = 300000;  // 合并登记：几百分片时 R2 合并较慢，给 5 分钟
   var MAX_ATTEMPTS = 5;              // 单片最多尝试 5 次（首次 + 4 次退避重试）
-  var CONCURRENCY = 3;               // 并发片数：实测单连接约 2.7MB/s，是「每连接限速」；
-                                     // 3 路并行可把 3.5GB 从 ~25 分钟压到 ~10 分钟。
-                                     // 若目标服务器只有单个 worker，可下调为 1～2。
+  // 并发片数。实测结论：**必须保持 1**，勿再改大。
+  // 曾试过 3 路并发，结果反而更慢：256MB 串行 342s（0.75MB/s），3 并发 384s（0.67MB/s）。
+  // 原因：Render 免费实例是单 gunicorn worker，多片同时到达也只是排队串行处理，
+  // 反而让浏览器侧多条连接的 TCP 窗口互相争抢，还额外吃内存（3×16MB 请求体缓冲）。
+  var CONCURRENCY = 1;
 
   function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
