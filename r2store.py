@@ -141,6 +141,85 @@ def make_presigned_put(key, content_type="", expires=900):
         return None
 
 
+# ---------------------------------------------------------------------------
+# 分片上传（浏览器直传用）：大视频切成小块逐片上传，单块失败可重试，
+# 天然适应不稳定网络；服务器只签名与合并，不经手文件本体。
+# ---------------------------------------------------------------------------
+def create_mpu(key, content_type=""):
+    """创建分片上传任务，返回 upload_id。"""
+    if not USE_R2:
+        return None
+    ct = content_type or "application/octet-stream"
+    return _get_client().create_multipart_upload(
+        Bucket=R2_BUCKET, Key=key, ContentType=ct
+    )["UploadId"]
+
+
+def presign_part(key, upload_id, part_number, expires=3600):
+    """签发单个分片的预签名 PUT URL（每片单独签名，便于失败后重签重试）。"""
+    if not USE_R2:
+        return None
+    try:
+        return _get_client().generate_presigned_url(
+            "upload_part",
+            Params={"Bucket": R2_BUCKET, "Key": key,
+                    "UploadId": upload_id, "PartNumber": part_number},
+            ExpiresIn=expires,
+        )
+    except Exception as e:
+        print("[r2] 生成预签名分片 URL 失败 %s#%d: %s" % (key, part_number, e))
+        return None
+
+
+def complete_mpu(key, upload_id, parts):
+    """合并已上传的分片。parts: [{"ETag": ..., "PartNumber": n}, ...]（按 PartNumber 升序）。"""
+    if not USE_R2:
+        return
+    _get_client().complete_multipart_upload(
+        Bucket=R2_BUCKET, Key=key, UploadId=upload_id,
+        MultipartUpload={"Parts": parts},
+    )
+
+
+def abort_mpu(key, upload_id):
+    """放弃分片上传任务（已传分片一并清除）。"""
+    if not USE_R2:
+        return
+    try:
+        _get_client().abort_multipart_upload(Bucket=R2_BUCKET, Key=key, UploadId=upload_id)
+    except Exception:
+        pass
+
+
+def list_mpus():
+    """列出桶内进行中的分片上传任务，返回 [{key, upload_id, initiated}]。"""
+    if not USE_R2:
+        return []
+    out, ct = [], None
+    while True:
+        resp = (_get_client().list_multipart_uploads(Bucket=R2_BUCKET, ContinuationToken=ct)
+                if ct else _get_client().list_multipart_uploads(Bucket=R2_BUCKET))
+        for u in resp.get("Uploads", []):
+            out.append({"key": u["Key"], "upload_id": u["UploadId"],
+                        "initiated": u["Initiated"]})
+        if not resp.get("IsTruncated"):
+            break
+        ct = resp.get("NextContinuationToken")
+    return out
+
+
+def abort_stale_mpu(max_age_hours=24):
+    """清理超时未完成的分片任务（浏览器中途关闭会留下孤儿分片，占存储额度）。"""
+    if not USE_R2:
+        return
+    import datetime
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=max_age_hours)
+    for m in list_mpus():
+        if m["initiated"] < cutoff:
+            print("[r2] 清理超时分片任务: %s (%s)" % (m["key"], m["initiated"]))
+            abort_mpu(m["key"], m["upload_id"])
+
+
 def object_exists(key):
     """R2 中是否存在该对象。"""
     if not USE_R2:

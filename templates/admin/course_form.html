@@ -203,7 +203,11 @@ window.KB_USE_R2 = {{ 'true' if r2_enabled else 'false' }};</script>
       ev.preventDefault();
       var mid = f.getAttribute('data-mid');
       if(mid){ sessionStorage.setItem('kbMetaMid', mid); }
-      // R2 模式下，含文件的表单走「浏览器直传 R2」，避免服务器接收大文件失败
+      // R2 模式下含文件的表单走「浏览器分片直传」：
+      // 文件切 8MB 小片，每片向服务器要预签名 URL 后直传 R2，单片失败自动重试。
+      // （不能整文件单 PUT 直传：本网络对 R2 的大块单请求会中途断流，表现为
+      //   进度条走完但对象从未落进 R2；也不能整文件走服务器中转：Render 的
+      //   gunicorn worker 读大请求体超 30s 即被杀。历史教训详见 admin-upload.js 注释。）
       var fileInput = f.querySelector('input[type=file]');
       var hasFiles = fileInput && fileInput.files && fileInput.files.length;
       if(window.KB_USE_R2 && hasFiles && window.kbUploadDirect){

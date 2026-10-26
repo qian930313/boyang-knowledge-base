@@ -216,6 +216,12 @@ img{max-width:100%}
   background:#2FA36B;box-shadow:0 6px 20px rgba(47,163,107,.35);
   transition:opacity .5s,transform .5s}
 .panel-toast.out{opacity:0;transform:translateX(-50%) translateY(-12px)}
+/* 失败提示必须与成功提示在颜色上明确区分。
+   此前只有统一的绿色样式，上传失败时也弹绿色浮层，用户会误以为「已经成功」，
+   于是不停重试、却始终在页面上看不到文件，最终只能描述成「进度条走完但什么都没有」。 */
+.panel-toast-error{background:#C0392B;box-shadow:0 6px 20px rgba(192,57,43,.4);
+  font-weight:600;max-width:min(760px,92vw);white-space:pre-wrap;line-height:1.5}
+.panel-toast-warn{background:#D98324;box-shadow:0 6px 20px rgba(217,131,36,.4)}
 
 /* 上传进度（大视频上传耗时长，必须让用户看到真实进度） */
 .up-wrap{margin-top:10px}

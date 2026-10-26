@@ -32,6 +32,11 @@ if r2store.USE_R2:
 db.init_db()
 if r2store.USE_R2:
     r2store.sync_db_to_r2()
+    # 清理历史上传遗留的孤儿分片（浏览器中途关闭会留下未合并分片，占存储额度）
+    try:
+        r2store.abort_stale_mpu(max_age_hours=24)
+    except Exception as e:
+        print("[r2] 清理孤儿分片失败（忽略）:", e)
 
 
 # ---------------- 全局 ----------------
@@ -735,16 +740,37 @@ def admin_upload(cid):
     return redirect(url_for("admin_course_edit", cid=cid))
 
 
-# 浏览器直传 R2 时，本批上传的 batch token -> 统一 unit_id 的映射（进程内缓存，单实例够用）
+# 浏览器分片直传 R2：本批上传的 batch token -> 统一 unit_id 的映射（进程内缓存，单实例够用）
 _BATCH_UNITS = {}
 
+# 分片大小：8MB。实测本网络环境对 R2 的大块单请求会中途断流（几百 MB 单 PUT 超时，
+# 表现为「进度条走完但对象从未落进 R2」），而 8MB 小块稳定；每片独立签名、失败重试。
+MPU_PART_SIZE = 8 * 1024 * 1024
 
-@app.route("/admin/course/<int:cid>/sign", methods=["POST"])
-def admin_sign_upload(cid):
-    """为「浏览器直传 R2」签发一次性上传凭证（预签名 PUT URL）。
 
-    服务器不接收文件本体，仅做：扩展名校验 + 容量预判 + 生成唯一 key + 返回预签名 URL。
-    前端拿到 URL 后自行把文件 PUT 到 R2，再调用 commit-batch 登记数据库。"""
+def _unique_object_key(cid, name):
+    """按原始文件名生成桶内唯一 key（"<cid>/<安全名>"，重名自动加序号）。
+
+    key 统一不带 "uploads/" 前缀，与 _store_uploads 旧路径保持一致，
+    使 file_path 与 uploads() 路由 / get_url 的命名空间统一（避免 /uploads/uploads/ 双重前缀）。"""
+    ext = os.path.splitext(name)[1].lower()
+    stem = secure_filename(os.path.splitext(name)[0]).strip("._-") or "file"
+    fname = stem + ext
+    key = "%d/%s" % (cid, fname)
+    i = 1
+    while r2store.object_exists(key):
+        fname = "%s_%d%s" % (stem, i, ext)
+        key = "%d/%s" % (cid, fname)
+        i += 1
+    return key
+
+
+@app.route("/admin/course/<int:cid>/mpu-init", methods=["POST"])
+def admin_mpu_init(cid):
+    """创建一个文件的分片上传任务（浏览器直传 R2 第 1 步）。
+
+    服务器只做：扩展名校验 + 容量预判 + 生成唯一 key + 创建 R2 分片任务。
+    返回 uploadId 与分片大小，前端据此逐片请求预签名 URL 并直传 R2。"""
     r = ensure_admin()
     if r is not None:
         return jsonify(error="未登录"), 401
@@ -765,49 +791,78 @@ def admin_sign_upload(cid):
     ok, _used, _limit, msg = r2store.check_capacity(size)
     if not ok:
         return jsonify(error=msg), 413
-    # 生成唯一 key（避免重名覆盖）。key 不带 "uploads/" 前缀，
-    # 与 _store_uploads 旧路径保持一致（均为 "<cid>/<file>"），
-    # 这样 file_path 与 uploads() 路由 / get_url 的命名空间统一，避免前台出现 /uploads/uploads/... 双重前缀。
-    stem = secure_filename(os.path.splitext(name)[0]).strip("._-") or "file"
-    fname = stem + ext
-    key = "%d/%s" % (cid, fname)
-    i = 1
-    while r2store.object_exists(key):
-        fname = "%s_%d%s" % (stem, i, ext)
-        key = "uploads/%d/%s" % (cid, fname)
-        i += 1
+    key = _unique_object_key(cid, name)
     content_type = r2store.guess_content_type(ext)
-    # 预签名有效期提到 1 小时：培训视频常数百 MB~1GB+，慢速网络下上传可能超过默认 15 分钟，
-    # 否则 PUT 中途签名过期会失败（前端表现为「进度条走完但没提示/前台不显示」）。
-    url = r2store.make_presigned_put(key, content_type, expires=3600)
+    try:
+        upload_id = r2store.create_mpu(key, content_type)
+    except Exception as e:
+        print("[r2] 创建分片上传失败 %s: %s" % (key, e))
+        return jsonify(error="创建上传任务失败，请重试"), 500
+    # 单独回传「显示用标题」：存储 key 里的中文会被 secure_filename 过滤成 file，
+    # 若拿 key 反推标题，用户上传的中文视频名在后台就全变成 "file"，无从分辨。
+    title = os.path.splitext(name)[0].strip() or name
+    return jsonify(key=key, uploadId=upload_id, contentType=content_type,
+                   partSize=MPU_PART_SIZE, title=title, method="PUT")
+
+
+@app.route("/admin/course/<int:cid>/mpu-sign-part", methods=["POST"])
+def admin_mpu_sign_part(cid):
+    """签发单个分片的预签名 PUT URL（第 2 步，每片调用一次，便于失败后重签重试）。"""
+    r = ensure_admin()
+    if r is not None:
+        return jsonify(error="未登录"), 401
+    if not r2store.USE_R2:
+        return jsonify(error="未启用云存储，无法直传"), 400
+    data = request.get_json(silent=True) or {}
+    key = data.get("key") or ""
+    upload_id = data.get("uploadId") or ""
+    try:
+        part_number = int(data.get("partNumber") or 0)
+    except (TypeError, ValueError):
+        part_number = 0
+    if not key.startswith("%d/" % cid) or not upload_id or not 1 <= part_number <= 10000:
+        return jsonify(error="参数不合法"), 400
+    url = r2store.presign_part(key, upload_id, part_number, expires=3600)
     if not url:
         return jsonify(error="生成上传凭证失败"), 500
-    return jsonify(key=key, url=url, contentType=content_type, method="PUT")
+    return jsonify(url=url, method="PUT")
 
 
-@app.route("/admin/course/<int:cid>/commit-batch", methods=["POST"])
-def admin_commit_batch(cid):
-    """直传完成后，把一批已上传到 R2 的文件登记进数据库。
+@app.route("/admin/course/<int:cid>/mpu-complete", methods=["POST"])
+def admin_mpu_complete(cid):
+    """合并分片并把该文件登记进数据库（第 3 步，每个文件传完后调用一次）。
 
-    前端在全部文件 PUT 完成后调用本接口，一次性提交：
-      { batch, meta:{course_title,lecturer,record_time,sort}, files:[{key,name}, ...] }
-    同批文件共享一个 unit_id（保持与旧逻辑一致的「一次上传成组」行为）。"""
+    请求：{ key, uploadId, parts:[{ETag,PartNumber}], batch,
+            meta:{course_title,lecturer,record_time,sort} }
+    同批文件（同 batch token）共享一个 unit_id，与旧「一次上传成组」行为一致。"""
     r = ensure_admin()
     if r is not None:
         return jsonify(error="未登录"), 401
     if not db.get_course(cid):
         return jsonify(error="课程不存在"), 404
     data = request.get_json(silent=True) or {}
-    files = data.get("files") or []
-    if not files:
-        return jsonify(error="没有要提交的视频"), 400
-    for f in files:
-        key = f.get("key") or ""
-        if not key.startswith("%d/" % cid):
-            return jsonify(error="非法的文件 key"), 400
-        if not r2store.object_exists(key):
-            return jsonify(error="文件尚未上传完成：%s" % (f.get("name") or key)), 400
-    # 本批次统一 unit_id（同 token 复用，跨文件成组）
+    key = data.get("key") or ""
+    upload_id = data.get("uploadId") or ""
+    parts = data.get("parts") or []
+    if not key.startswith("%d/" % cid) or not upload_id:
+        return jsonify(error="参数不合法"), 400
+    clean_parts = []
+    for p in parts:
+        try:
+            clean_parts.append({"ETag": str(p["ETag"]), "PartNumber": int(p["PartNumber"])})
+        except (KeyError, TypeError, ValueError):
+            return jsonify(error="分片信息不完整"), 400
+    if not clean_parts:
+        return jsonify(error="没有已上传的分片"), 400
+    clean_parts.sort(key=lambda p: p["PartNumber"])
+    try:
+        r2store.complete_mpu(key, upload_id, clean_parts)
+    except Exception as e:
+        # 合并失败（个别分片实际未传上等）：保留分片任务，前端可重试
+        print("[r2] 合并分片失败 %s: %s" % (key, e))
+        return jsonify(error="云存储合并失败，请重试"), 500
+
+    # ---- 本批次统一 unit_id（同 token 复用，跨文件成组）----
     token = (data.get("batch") or "").strip() or ("b%d" % int(time.time() * 1000))
     now = time.time()
     unit_id = None
@@ -817,46 +872,63 @@ def admin_commit_batch(cid):
         row = db.fetch_one("SELECT COALESCE(MAX(unit_id),0) AS u FROM materials WHERE course_id=?",
                            (cid,))
         unit_id = (row["u"] if row else 0) + 1
-        _BATCH_UNITS[token] = (unit_id, now)
+        _BATCH_UNITS[token] = (unit_id, now, [])
     for k in [k for k, v in _BATCH_UNITS.items() if now - v[1] > 3600]:
         del _BATCH_UNITS[k]
 
     meta = data.get("meta") or {}
-    sort = int(meta.get("sort") or 0)
-    ct = (meta.get("course_title") or "").strip() or None
-    le = (meta.get("lecturer") or "").strip() or None
-    rt = (meta.get("record_time") or "").strip() or None
-    inserted = []
-    for f in files:
-        key = f["key"]
-        name = f.get("name") or key.split("/")[-1]
-        ext = os.path.splitext(name)[1].lower()
-        mtype = "video" if ext in config.ALLOWED_VIDEO_EXT else "doc"
-        title = os.path.splitext(name)[0].strip() or name
-        # 直传模式不做本地 PDF 转换（文档仍可下载，仅缺少浏览器内预览）
-        mid = db.execute(
-            "INSERT INTO materials(course_id,type,title,file_path,preview_path,sort,unit_id,"
-            "course_title,lecturer,record_time) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (cid, mtype, title, key, None, sort, unit_id, ct, le, rt),
-        )
-        inserted.append((mid, mtype))
-    # 同批次只有一个视频时，课件自动作为该视频附件（与原逻辑一致）
-    videos = [mid for mid, t in inserted if t == "video"]
+    name = key.split("/")[-1]
+    ext = os.path.splitext(name)[1].lower()
+    mtype = "video" if ext in config.ALLOWED_VIDEO_EXT else "doc"
+    # 优先用上传时回传的原始文件名（含中文）；key 里的中文已被 secure_filename 过滤，
+    # 不能直接拿来当标题，否则中文视频名在后台会全部显示成 "file"。
+    title = ((data.get("title") or "").strip()[:200]
+             or os.path.splitext(name)[0].strip() or name)
+    mid = db.execute(
+        "INSERT INTO materials(course_id,type,title,file_path,preview_path,sort,unit_id,"
+        "course_title,lecturer,record_time) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (cid, mtype, title, key, None,
+         int(meta.get("sort") or 0), unit_id,
+         (meta.get("course_title") or "").strip() or None,
+         (meta.get("lecturer") or "").strip() or None,
+         (meta.get("record_time") or "").strip() or None),
+    )
+    # 同批次只有一个视频时，课件自动作为该视频附件（与旧逻辑一致，跨文件追溯）
+    inserted = _BATCH_UNITS[token][2]
+    inserted.append((mid, mtype))
+    videos = [i_mid for i_mid, t in inserted if t == "video"]
     if len(videos) == 1:
         v = db.fetch_one("SELECT course_title,lecturer,record_time FROM materials WHERE id=?",
                          (videos[0],))
-        for mid, t in inserted:
+        for i_mid, t in inserted:
             if t == "video":
                 continue
-            db.execute("UPDATE materials SET attach_id=? WHERE id=?", (videos[0], mid))
+            db.execute("UPDATE materials SET attach_id=? WHERE id=?", (videos[0], i_mid))
             db.execute(
                 "UPDATE materials SET "
                 "course_title=COALESCE(NULLIF(course_title,''),?),"
                 "lecturer=COALESCE(NULLIF(lecturer,''),?),"
                 "record_time=COALESCE(NULLIF(record_time,''),?) WHERE id=?",
-                (v["course_title"], v["lecturer"], v["record_time"], mid),
+                (v["course_title"], v["lecturer"], v["record_time"], i_mid),
             )
-    return jsonify(ok=True, count=len(inserted))
+    return jsonify(ok=True, id=mid, type=mtype)
+
+
+@app.route("/admin/course/<int:cid>/mpu-abort", methods=["POST"])
+def admin_mpu_abort(cid):
+    """放弃一个未完成的分片任务（前端上传失败时调用，清除已传分片释放额度）。"""
+    r = ensure_admin()
+    if r is not None:
+        return jsonify(error="未登录"), 401
+    if not r2store.USE_R2:
+        return jsonify(error="未启用云存储"), 400
+    data = request.get_json(silent=True) or {}
+    key = data.get("key") or ""
+    upload_id = data.get("uploadId") or ""
+    if not key.startswith("%d/" % cid) or not upload_id:
+        return jsonify(error="参数不合法"), 400
+    r2store.abort_mpu(key, upload_id)
+    return jsonify(ok=True)
 
 
 @app.route("/admin/course/<int:cid>/videos-meta", methods=["POST"])
